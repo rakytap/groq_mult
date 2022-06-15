@@ -3,6 +3,7 @@ import groq.api.nn as nn
 import numpy as np
 print("Python packages imported successfully")
 
+######################################################################################x
 # Create and compile program for Groq chip
 
 matrix1 = g.input_tensor(shape=(2, 50), dtype=g.int8, name="matrix1", layout="H1(W), -1, S2")
@@ -29,58 +30,68 @@ result = top(matrix1, matrix2, time=0)    # call into the instance of the top le
 
 iop_file = g.compile(base_name="matmul", result_tensor=result)
 #g.write_visualizer_data("matmul")
+######################################################################################x
 
 
 
-
-# calculate the result with numpy
+# calculate the expected result with numpy
 
 
 # prepare input data
-t1_data_0 = np.random.randint(-2, 2, (1, 50), dtype=np.int8).astype(np.int8)
-t1_data_1 = np.random.randint(-2, 2, (1, 50), dtype=np.int8).astype(np.int8)
-t1_data = np.concatenate( (t1_data_0, t1_data_1), axis=0)
-t1_data_16 = t1_data_0.astype(np.int16) + pow(2,7)*t1_data_1.astype(np.int16)
+t1_data_0 = np.random.randint(-2, 2, (1, 50), dtype=np.int8).astype(np.int8) # the lower 8 bits of 16 bits integers
+t1_data_1 = np.random.randint(-2, 2, (1, 50), dtype=np.int8).astype(np.int8) # the upper 8 bits of 16 bits integers
+t1_data = np.concatenate( (t1_data_0, t1_data_1), axis=0)                    # store the upper and lower bits in a single matrix
+t1_data_16 = t1_data_0.astype(np.int16) + pow(2,7)*t1_data_1.astype(np.int16) # the combined 16bit integers
 print(t1_data.shape)
 
 
 
-t2_data_0 = np.random.randint(-2, 2, (50, 50), dtype=np.int8).astype(np.int8)
-t2_data_1 = np.random.randint(-2, 2, (50, 50), dtype=np.int8).astype(np.int8)
-t2_data = np.concatenate( (t2_data_0, t2_data_1), axis=0)
+t2_data_0 = np.random.randint(-2, 2, (50, 50), dtype=np.int8).astype(np.int8) # the lower 8 bits of 16 bits integers
+t2_data_1 = np.random.randint(-2, 2, (50, 50), dtype=np.int8).astype(np.int8) # the upper 8 bits of 16 bits integers
+t2_data = np.concatenate( (t2_data_0, t2_data_1), axis=0)                     # store the upper and lower bits in a single matrix
 t2_data_transpose = t2_data.transpose()
-t2_data_16 = t2_data_0.astype(np.int16) + pow(2,7)*t2_data_1.astype(np.int16)
+t2_data_16 = t2_data_0.astype(np.int16) + pow(2,7)*t2_data_1.astype(np.int16) # the combined 16bit integers
 t2_data_transpose_16 = t2_data_16.transpose()
 print(t2_data_transpose.shape)
 
-
-oracle = np.matmul(t1_data.astype(np.int32), t2_data_transpose.astype(np.int32), dtype=np.int32)
-oracle_16 = np.matmul(t1_data_16, t2_data_transpose_16, dtype=np.int32)
-print(oracle[0,0:50] + pow(2,7)*(oracle[1,0:50]+oracle[0,50:]) + pow(2,14)*oracle[1,50:])
+   
+oracle = np.matmul(t1_data, t2_data_transpose, dtype=np.int32)                            # the result of the 8bit input matrix multiplication
+print(oracle[0,0:50] + pow(2,7)*(oracle[1,0:50]+oracle[0,50:]) + pow(2,14)*oracle[1,50:]) # combining lower and upper 8 bits of the calculated products to get the result of corresponding to the 16bit inputs
 print(' ')
+
+oracle_16 = np.matmul(t1_data_16, t2_data_transpose_16, dtype=np.int32)                   # the result of the 16bit input matrix multiplication
 print(oracle_16)
 print('oracle shape:'+str(oracle.shape))
 #print(oracle)
 
-
+##########################################################################################################
 # Run the compiled code on the Groq chip
+
+
 program = g.create_tsp_runner(iop_file)
 result = program(matrix1=t1_data, matrix2=t2_data)
 print('Groq result shape:'+str(result['mm_result'].shape))
 #print(result['mm_result'].astype(np.int8))
 
+# combing the result of the products of the 8bit input matrices to get the result of the product of 16bit input matrices
+
 result_data = np.zeros( (t1_data.shape[0], t2_data.shape[0]), dtype=np.uint32 )
 #print( result['mm_result'][0].shape )
+# combining 8bit result parts into 32bit results corresponding to the product of 8bit input matrices
 for idx in range( result['mm_result'][0].shape[0] ):
     result_tmp = result['mm_result'][:,idx,:]
-    #print(result_tmp.shape)
     result_data = result_data + result_tmp*pow(2,8*idx)
 
 print(result_data.shape )
 
+# casting to signed integer
 result_data = result_data.astype(dtype=np.int32)
+
+# combining lower and upper 8 bits of the calculated products to get the result of corresponding to the 16bit inputs
 result_data = result_data[0,0:50] + pow(2,7)*(result_data[1,0:50]+result_data[0,50:]) + pow(2,14)*result_data[1,50:]
 
+
+###########################################################################################################
 # Check Result
 
 
