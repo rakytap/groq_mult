@@ -12,17 +12,45 @@ matrix2 = g.input_tensor(shape=(100, 50), dtype=g.int8, name="matrix2", layout="
 class TopLevel(g.Component):  # Create our top level component
     def __init__(self):
         super().__init__()
-        self.mm = nn.MatMul(name="MyMatMul")     #Matmul: using the nn.MatMul() component.
+        self.mm = nn.MatMul(name="MyMatMul2", use_vxm_accum=True, out_strm_rq=g.SG4[3])     #Matmul: using the nn.MatMul() component.
 
     def build(self, mat1_mt, mat2_mt, time=0):   #Provide input matrices and a default time
         with g.ResourceScope(name="mmscope", is_buffered=True, time=0) as mmscope :   
             #result_mt = self.mm(mat1_mt, mat2_mt, time=0).write(name="mm_result", layout="H1(W), -1, S4")  #recommended layout for the matmul result
 
-            result_st = self.mm(mat1_mt, mat2_mt, time=0)  #recommended layout for the matmul result
-            result_st = g.reinterpret(result_st, g.int8)
-            result_mt = result_st.write(name="mm_result", layout="H1(W), -1, S4")
+            result_st = self.mm(mat1_mt, mat2_mt, time=0)  
+            '''
+            print('test split')
+            print( result_st.shape )
+            print( result_st.physical_shape  )
+            print( g.split.__doc__)
 
-        return result_mt
+            result_st = g.reinterpret(result_st, g.int8)
+            print(result_st.shape)
+            print(result_st.physical_shape)
+            tmp_st = g.split(result_st,1, 1)
+            print(tmp_st)
+            print(tmp_st[0])
+            print(tmp_st[1])
+            print(tmp_st[2])
+            print(tmp_st[3])
+
+            tmp_mt = tmp_st[0].write(name="mm_splited_result", layout="H1(W), -1, S1")
+            '''
+
+            print('test split')
+            print( result_st.shape )
+
+            separeted_bits_st = g.split(result_st,1, 0)
+            lower_bits_st  = separeted_bits_st[0].write(name="lower_bits", layout="H1(W), -1, S4")
+            higher_bits_st = separeted_bits_st[1].write(name="higher_bits", layout="H1(W), -1, S4")
+
+            
+
+            #result_mt = result_st.write(name="mm_result", layout="H1(W), -1, S4")
+
+        #return result_mt
+        return lower_bits_st, higher_bits_st
 
 
 top = TopLevel()    # instantiate the top level component
@@ -35,7 +63,7 @@ iop_file = g.compile(base_name="matmul", result_tensor=result)
 
 
 # calculate the expected result with numpy
-
+print('Calculating expected numpy result')
 
 # prepare input data
 t1_data_0 = np.random.randint(-2, 2, (1, 50), dtype=np.int8).astype(np.int8) # the lower 8 bits of 16 bits integers
@@ -66,27 +94,16 @@ print('oracle shape:'+str(oracle.shape))
 
 ##########################################################################################################
 # Run the compiled code on the Groq chip
-
+print('Running the code on the Groq chip')
 
 program = g.create_tsp_runner(iop_file)
 result = program(matrix1=t1_data, matrix2=t2_data)
-print('Groq result shape:'+str(result['mm_result'].shape))
-#print(result['mm_result'].astype(np.int8))
-
-# combing the result of the products of the 8bit input matrices to get the result of the product of 16bit input matrices
-
-result_data = np.zeros( (t1_data.shape[0], t2_data.shape[0]), dtype=np.int32 )
-#print( result['mm_result'][0].shape )
-# combining 8bit result parts into 32bit results corresponding to the product of 8bit input matrices
-for idx in range( result['mm_result'][0].shape[0] ):
-    result_tmp = result['mm_result'][:,idx,:]
-    result_data = result_data + np.left_shift(result_tmp, 8*idx).astype(np.int32)
-
-print(result_data.shape )
+lower_bits = result['lower_bits']
+higher_bits = result['higher_bits']
 
 
 # combining lower and upper 8 bits of the calculated products to get the result of corresponding to the 16bit inputs
-result_data = result_data[0,0:50] + np.left_shift(result_data[1,0:50]+result_data[0,50:], 7) + np.left_shift(result_data[1,50:], 14 )
+result_data = lower_bits[0,0:50] + np.left_shift(higher_bits[0,0:50]+lower_bits[0,50:], 7) + np.left_shift(higher_bits[0,50:], 14 )
 
 
 ###########################################################################################################
