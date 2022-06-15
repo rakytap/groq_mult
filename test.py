@@ -19,7 +19,7 @@ class TopLevel(g.Component):  # Create our top level component
             #result_mt = self.mm(mat1_mt, mat2_mt, time=0).write(name="mm_result", layout="H1(W), -1, S4")  #recommended layout for the matmul result
 
             result_st = self.mm(mat1_mt, mat2_mt, time=0)  #recommended layout for the matmul result
-            result_st = g.reinterpret(result_st, g.uint8)
+            result_st = g.reinterpret(result_st, g.int8)
             result_mt = result_st.write(name="mm_result", layout="H1(W), -1, S4")
 
         return result_mt
@@ -41,7 +41,7 @@ iop_file = g.compile(base_name="matmul", result_tensor=result)
 t1_data_0 = np.random.randint(-2, 2, (1, 50), dtype=np.int8).astype(np.int8) # the lower 8 bits of 16 bits integers
 t1_data_1 = np.random.randint(-2, 2, (1, 50), dtype=np.int8).astype(np.int8) # the upper 8 bits of 16 bits integers
 t1_data = np.concatenate( (t1_data_0, t1_data_1), axis=0)                    # store the upper and lower bits in a single matrix
-t1_data_16 = t1_data_0.astype(np.int16) + pow(2,7)*t1_data_1.astype(np.int16) # the combined 16bit integers
+t1_data_16 = t1_data_0.astype(np.int16) + np.left_shift(t1_data_1.astype(np.int16), 7) # the combined 16bit integers
 print(t1_data.shape)
 
 
@@ -50,13 +50,13 @@ t2_data_0 = np.random.randint(-2, 2, (50, 50), dtype=np.int8).astype(np.int8) # 
 t2_data_1 = np.random.randint(-2, 2, (50, 50), dtype=np.int8).astype(np.int8) # the upper 8 bits of 16 bits integers
 t2_data = np.concatenate( (t2_data_0, t2_data_1), axis=0)                     # store the upper and lower bits in a single matrix
 t2_data_transpose = t2_data.transpose()
-t2_data_16 = t2_data_0.astype(np.int16) + pow(2,7)*t2_data_1.astype(np.int16) # the combined 16bit integers
+t2_data_16 = t2_data_0.astype(np.int16) + np.left_shift(t2_data_1.astype(np.int16), 7) # the combined 16bit integers
 t2_data_transpose_16 = t2_data_16.transpose()
 print(t2_data_transpose.shape)
 
    
 oracle = np.matmul(t1_data, t2_data_transpose, dtype=np.int32)                            # the result of the 8bit input matrix multiplication
-print(oracle[0,0:50] + pow(2,7)*(oracle[1,0:50]+oracle[0,50:]) + pow(2,14)*oracle[1,50:]) # combining lower and upper 8 bits of the calculated products to get the result of corresponding to the 16bit inputs
+print(oracle[0,0:50] + np.left_shift(oracle[1,0:50]+oracle[0,50:], 7) + np.left_shift(oracle[1,50:], 14) ) # combining lower and upper 8 bits of the calculated products to get the result of corresponding to the 16bit inputs
 print(' ')
 
 oracle_16 = np.matmul(t1_data_16, t2_data_transpose_16, dtype=np.int32)                   # the result of the 16bit input matrix multiplication
@@ -75,20 +75,18 @@ print('Groq result shape:'+str(result['mm_result'].shape))
 
 # combing the result of the products of the 8bit input matrices to get the result of the product of 16bit input matrices
 
-result_data = np.zeros( (t1_data.shape[0], t2_data.shape[0]), dtype=np.uint32 )
+result_data = np.zeros( (t1_data.shape[0], t2_data.shape[0]), dtype=np.int32 )
 #print( result['mm_result'][0].shape )
 # combining 8bit result parts into 32bit results corresponding to the product of 8bit input matrices
 for idx in range( result['mm_result'][0].shape[0] ):
     result_tmp = result['mm_result'][:,idx,:]
-    result_data = result_data + result_tmp*pow(2,8*idx)
+    result_data = result_data + np.left_shift(result_tmp, 8*idx).astype(np.int32)
 
 print(result_data.shape )
 
-# casting to signed integer
-result_data = result_data.astype(dtype=np.int32)
 
 # combining lower and upper 8 bits of the calculated products to get the result of corresponding to the 16bit inputs
-result_data = result_data[0,0:50] + pow(2,7)*(result_data[1,0:50]+result_data[0,50:]) + pow(2,14)*result_data[1,50:]
+result_data = result_data[0,0:50] + np.left_shift(result_data[1,0:50]+result_data[0,50:], 7) + np.left_shift(result_data[1,50:], 14 )
 
 
 ###########################################################################################################
