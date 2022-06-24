@@ -2,8 +2,8 @@ import numpy as np
 
 
 bitchunk = 7
-num_of_chunks = 2
-full_bitwidth = num_of_chunks*bitchunk
+num_of_chunks = 9
+full_bitwidth = 60#num_of_chunks*bitchunk
 bound = pow(2, full_bitwidth)
 #bound = 4
 
@@ -15,10 +15,10 @@ def divide_into_bitchunks(inp, num_of_chunks):
 
     sign_bits = np.sign(inp)
     sign_bits = (np.abs(sign_bits) - sign_bits)/2
-    sign_bits = sign_bits.astype(np.uint8)
-
+    sign_bits = sign_bits.astype(np.int8)
+    #print( sign_bits[:,0:10] )
     #print(inp)
-    inp_loc = inp.copy().astype(np.uint32)
+    inp_loc = inp.copy()
     #print(inp_loc)
 
 
@@ -38,7 +38,8 @@ def divide_into_bitchunks(inp, num_of_chunks):
         
         # adding sign bit
         if( chunk == num_of_chunks-1) :
-            ret[chunk] += pow(2,bitchunk)*sign_bits
+            bit = (inp_loc % 2)
+            ret[chunk] = (ret[chunk].astype(np.uint8) + pow(2,bitchunk)*bit).astype(np.int8)
                 
 
     return ret
