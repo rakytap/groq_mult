@@ -9,9 +9,9 @@ print("Python packages imported successfully")
 # Create and compile program for Groq chip
 
 dim = 70
+num_of_chunks_result = 9
 
-
-matrix1 = g.input_tensor(shape=(bch.num_of_chunks, dim), dtype=g.int8, name="matrix1", layout="H1(W), -1, S2(22-23)")
+matrix1 = g.input_tensor(shape=(num_of_chunks_result, dim), dtype=g.int8, name="matrix1", layout="H1(W), -1, S2(22-23)")
 matrix20 = g.input_tensor(shape=(bch.num_of_chunks*dim, dim), dtype=g.int8, name="matrix20", layout="H1(W), -1, S16")
 #matrix21 = g.input_tensor(shape=(bch.num_of_chunks*dim, dim), dtype=g.int8, name="matrix21", layout="H1(E), -1, S16")
 
@@ -116,7 +116,7 @@ t2_data = np.random.rand(dim, dim)*2 - 1.0
 
 
 # create 8 bit chunks
-t1_data_8, exponent_t1_data = bch.divide_double_into_bitchunks(t1_data, bch.num_of_chunks)
+t1_data_8, exponent_t1_data = bch.divide_double_into_bitchunks(t1_data, num_of_chunks_result)
 
 # recombine chunk into 64 floats
 t1_data_double = bch.combine_bitchunks_into_double(t1_data_8, exponent_t1_data)
@@ -133,7 +133,7 @@ t2_data_double = bch.combine_bitchunks_into_double(t2_data_8, exponent_t2_data)
 
 print('test t2_data: '+str(np.allclose(t2_data, t2_data_double, rtol=1e-1, atol=1e-1, equal_nan=True)))
 
-
+###########################################################################################
 
 t0 = time.time()
 # matmul with 32 bit arithmetics
@@ -141,12 +141,12 @@ mult_result = np.matmul(t1_data, t2_data.transpose())
 print("numpy time: " + str( time.time()-t0) )
 
 # multiplication with 8bit arithmetics
-mult_result_8 = np.matmul( t1_data_8.reshape((bch.num_of_chunks,dim)).astype(np.int64), t2_data_8.reshape((bch.num_of_chunks*dim,dim)).astype(np.int64).transpose() )
+mult_result_8 = np.matmul( t1_data_8.reshape((num_of_chunks_result,dim)).astype(np.int64), t2_data_8.reshape((bch.num_of_chunks*dim,dim)).astype(np.int64).transpose() )
 mult_result_exponent = exponent_t1_data + exponent_t2_data - bch.double_mantissa_bits # becouse of the multiplication the number of double mantissa bits in combining the 8bit results should be counted twice, hence here we offset the expoentn by the mantissa bit number
 
 
 # reshape the test result according to the expected inputs of the bitchunks module
-mult_result_8 = mult_result_8.reshape( (bch.num_of_chunks, 1, bch.num_of_chunks, dim) )
+mult_result_8 = mult_result_8.reshape( (num_of_chunks_result, 1, bch.num_of_chunks, dim) )
 
 # recombine chunk into 64bit floats
 mult_result_double = bch.combine_bitchunks_into_double(mult_result_8, mult_result_exponent)
@@ -171,17 +171,20 @@ print('Running the code on the Groq chip')
 
 program = g.create_tsp_runner(iop_file)
 t0 = time.time()
-result = program(matrix1=t1_data_8.reshape((bch.num_of_chunks,dim)), matrix20=t2_data_8.reshape((bch.num_of_chunks*dim,dim)))
+result = program(matrix1=t1_data_8.reshape((num_of_chunks_result,dim)), matrix20=t2_data_8.reshape((bch.num_of_chunks*dim,dim)))
 groq_result = result['result']
 
 
 # reshape the test result according to the expected inputs of the bitchunks module
-groq_result = groq_result.reshape( (bch.num_of_chunks, 1, bch.num_of_chunks, dim) )
+groq_result = groq_result.reshape( (num_of_chunks_result, 1, bch.num_of_chunks, dim) )
 mult_result_exponent = exponent_t1_data + exponent_t2_data - bch.double_mantissa_bits # becouse of the multiplication the number of double mantissa bits in combining the 8bit results should be counted twice, hence here we offset the expoentn by the mantissa bit number
 
 
 # recombine chunk into 64bit floats
 groq_result_double = bch.combine_bitchunks_into_double(groq_result, mult_result_exponent)
+
+groq_result_double2, mult_result_exponent_modified = bch.convert_groq_result_to_double(groq_result, mult_result_exponent)
+groq_result_double2 = bch.combine_bitchunks_into_double(groq_result_double2, mult_result_exponent_modified)
 
 
 print("Groq time: " + str( time.time()-t0) )
@@ -191,8 +194,11 @@ print("Groq time: " + str( time.time()-t0) )
 
 
 print("Matrix Multiplication for input tensors of size {} x {}.  Results are: ".format(t1_data.shape, t2_data.shape))
-print('Groq chip matmul: '+str(np.allclose(mult_result, groq_result_double, rtol=1e-1, atol=1e-1, equal_nan=True)))
-print(groq_result_double)
+print('Groq chip matmul: '+str(np.allclose(mult_result, groq_result_double, rtol=1e-10, atol=1e-15, equal_nan=True)))
+print('Groq chip matmul: '+str(np.allclose(mult_result, groq_result_double2, rtol=1e-10, atol=1e-15, equal_nan=True)))
+print(groq_result_double[0,1:4])
+print(groq_result_double2[0,1:4])
+print(mult_result[0,1:4])
 #print(t1_data)
 
 
