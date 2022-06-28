@@ -20,22 +20,28 @@ class TopLevel(g.Component):  # Create our top level component
         super().__init__()
         self.mm = nn.MatMul(name="MyMatMul", use_vxm_accum=True, planes=[0,1])     #Matmul: using the nn.MatMul() component.
         #self.mm2 = nn.MatMul(name="MyMatMul2", use_vxm_accum=True, planes=[2,3])     #Matmul: using the nn.MatMul() component.
+        
+        # ALU request for bitshift operations (The resource is reused within iterative calls)
+        self.bitshift_alu_rq = g.tensor.create_alu_request(alus=[4])
+        
+        # ALU request for element-wise add operations (The resource is reused within iterative calls)
+        self.add_alu_rq = g.tensor.create_alu_request(alus=[1])     
+        
+        # ALU request for element-wise and operations (The resource is reused within iterative calls)
+        self.and_alu_rq = g.tensor.create_alu_request(alus=[0])                
+
 
 
     def build(self, mat1_mt, mat20_mt, time=0):   #Provide input matrices and a default time
     #def build(self, mat1_mt, mat20_mt, mat21_mt, time=0):   #Provide input matrices and a default time
 
-        with g.ResourceScope(name="cpscope", is_buffered=True, time=0) as cpscope :   
-            in1_st = mat1_mt.read(streams=g.SG2, time=0)
-            in1_copy_mt = in1_st.write(name="write_copy", layout="H1(E), -1, S2")    #Assign a layout preferable to the MXM for the second matrix
 
-        with g.ResourceScope(name="mmscope", is_buffered=True, time=None, predecessors=[cpscope]) as mmscope :   
+        with g.ResourceScope(name="mmscope", is_buffered=True, time=0) as mmscope :   
             #result_mt = self.mm(mat1_mt, mat2_mt, time=0).write(name="mm_result", layout="H1(W), -1, S4")  #recommended layout for the matmul result
 
             #print( mat20_mt.physical_shape)
 
             result_st = self.mm(mat1_mt, mat20_mt, time=0)  #int8 multiplication results on SG4_E[4] when plane 0 is used
-            #result_st2 = self.mm2(in1_copy_mt, mat21_mt, time=0)  #int8 multiplication results on SG4_E[4] when plane 0 is used
 
 
             print(result_st.shape)
@@ -44,8 +50,8 @@ class TopLevel(g.Component):  # Create our top level component
             #print(result_st2.shape)
             #print(result_st2.physical_shape)
 
-            splitted_st = g.split_inner_splits(result_st)
-            print(len(splitted_st))
+            #splitted_st = g.split_inner_splits(result_st)
+            #print(len(splitted_st))
 
             '''
             #print(g.split.__doc__)
@@ -57,8 +63,152 @@ class TopLevel(g.Component):  # Create our top level component
             lower_bits_mt  = lower_bits_st.write(name="lower_bits", layout="H1(W), -1, S4(0-3)")
             higher_bits_mt = higher_bits_st.write(name="higher_bits", layout="H1(W), -1, S4(4-7)")
             '''
-            result_mt = result_st.write(name="result", layout="H1(E), -1, S4")
-            #result_mt2 = result_st2.write(name="result2", layout="H1(W), -1, S4") 
+            
+            #result_storreq = g.tensor.create_storage_request(layout="H1(W), A18(1-18), S4(0-3)")
+            #print( result_storreq )
+            #result_mt = result_st.write(name="result", storage_req=result_storreq)            
+            
+            #result_mem = result_mem = g.instruction.malloc( hemis=["W"],slices=range(0,4),banks=[0],count=2,reserve_key="example_key")
+            #result_mem2 = result_mem = g.instruction.malloc( hemis=["W"],slices=range(0,4),banks=[0],count=18,reserve_key="example_key2")
+            #result_mt = result_st.write(name="result", storage_req=result_mem2)  
+          
+            result_mt = result_st.write(name="result", layout="H1(W), A18, S4(4-7)")
+            
+            
+            #g.resolve_storage_requests(mmscope)
+            #print( result_mt.addrs )
+            
+        with g.ResourceScope(name="bitreducescope", is_buffered=True, time=None, predecessors=[mmscope]) as brscope :             
+            
+            
+            print('***************** tmp scope **********************')
+            
+            
+            
+            
+            # storage request for iteratively used memory space storing individual rows
+            row_storreq = g.tensor.create_storage_request(layout="H1(W), A2, S4(0-3)")
+            
+            # storage request for iteratively used bitshift stream tensor
+            bitshift_storreq = g.tensor.create_storage_request(layout="H1(W), A2, S1(8)")
+            
+            
+            # data used to read out data for stream tensors from memory
+            split_sizes = result_mt.physical_shape.inner_dims
+            split_num = result_mt.physical_shape.splits
+            vectors = result_mt.physical_shape.vectors            
+            
+            next_row_mt = None    
+            
+            for row_idx in range(1):#range(num_of_chunks_result):
+                print('Iteration: row_dx='+str(row_idx))
+                
+                if row_idx == 0:
+            
+                    # first create a stream tensor from the row of the stream
+                    row_mt_list = []
+                    for split_idx in range(len(split_sizes)):
+                        addrs_0 = np.array([g.instruction.parse_address(f"W4-{i+row_idx+split_idx*num_of_chunks_result}") for i in range(1)]).reshape(1, 1)
+                        addrs_1 = np.array([g.instruction.parse_address(f"W5-{i+row_idx+split_idx*num_of_chunks_result}") for i in range(1)]).reshape(1, 1)
+                        addrs_2 = np.array([g.instruction.parse_address(f"W6-{i+row_idx+split_idx*num_of_chunks_result}") for i in range(1)]).reshape(1, 1)
+                        addrs_3 = np.array([g.instruction.parse_address(f"W7-{i+row_idx+split_idx*num_of_chunks_result}") for i in range(1)]).reshape(1, 1)
+                
+                        addrs = np.concatenate( (addrs_0, addrs_1, addrs_2, addrs_3), axis=1 )
+                        print(addrs)
+                
+                                                                
+                        #print(addrs)                
+                        row_mt_list.append( g.from_addresses(addrs, inner_dim=split_sizes[split_idx], dtype=g.int32, name='row_mt_'+str(split_idx)  ) ) 
+                
+                
+                    row_mt = g.concat_inner_splits( row_mt_list )          
+                    row_st = row_mt.read(streams=g.SG4_E[2], time=0)
+                    
+                else:
+                
+                    row_st = next_row_mt.read(streams=g.SG4_E[2], time=None)
+            
+                # now shift the bits of the row 
+                dtype = g.int8
+                bitshift_st = g.constant_tensor(row_st.shape, dtype, name="bitshift_tensor", storage_req=bitshift_storreq)
+                bitshift_st.data = np.ones(row_st.shape, dtype=dtype.to_nptype()) * bch.bitchunk
+            
+                row_st = g.right_shift(row_st, bitshift_st, output_streams=g.SG4_E[2], alus=self.bitshift_alu_rq)
+            
+                       
+            
+                #now add the bit-shifted data to the next row
+                next_row_mt_list = []
+                for split_idx in range(len(split_sizes)):
+                    addrs_0 = np.array([g.instruction.parse_address(f"W4-{i+row_idx+split_idx*num_of_chunks_result}") for i in range(1,2)]).reshape(1, 1)
+                    addrs_1 = np.array([g.instruction.parse_address(f"W5-{i+row_idx+split_idx*num_of_chunks_result}") for i in range(1,2)]).reshape(1, 1)
+                    addrs_2 = np.array([g.instruction.parse_address(f"W6-{i+row_idx+split_idx*num_of_chunks_result}") for i in range(1,2)]).reshape(1, 1)
+                    addrs_3 = np.array([g.instruction.parse_address(f"W7-{i+row_idx+split_idx*num_of_chunks_result}") for i in range(1,2)]).reshape(1, 1)
+                
+                    addrs = np.concatenate( (addrs_0, addrs_1, addrs_2, addrs_3), axis=1 )
+                    print(addrs)
+                
+                                                                
+                    #print(addrs)                
+                    next_row_mt_list.append( g.from_addresses(addrs, inner_dim=split_sizes[split_idx], dtype=g.int32, name='next_row_mt_'+str(split_idx)  ) ) 
+                
+                
+                next_row_mt = g.concat_inner_splits( next_row_mt_list )     
+                next_row_st = next_row_mt.read(streams=g.SG4_E[3], time=None)   
+                next_row_st = g.add( row_st, next_row_st, output_streams=g.SG4_W[2], alus=self.add_alu_rq, time=None)
+            
+            
+                # save the data of next_row = next_row + 2^(-7)*row into memory (2^(-7) is the right-bitshift operation)
+                next_row_mt = next_row_st.write(name="next_row", storage_req=row_storreq)   
+            
+                #row_mt = row_st.write(name="row", layout="H1(E), A2, S4(0-3)")  
+                #next_row_mt = next_row_st.write(name="next_row", layout="H1(W), A2, S4")   
+            
+            
+
+            
+            
+                #######  extract lower 7 bits of the row and store them into memory  ###########
+            
+                lower_bits_mt_list = []
+                for split_idx in range(len(split_sizes)):
+                    addrs = np.array([g.instruction.parse_address(f"W4-{i+row_idx+split_idx*num_of_chunks_result}") for i in range(1)]).reshape(1, 1)
+                    print(addrs)                
+                    lower_bits_mt_list.append( g.from_addresses(addrs, inner_dim=split_sizes[split_idx], dtype=g.int8, name='lower_bits_mt'+str(split_idx))  )                
+               
+                
+                lower_bits_mt = g.concat_inner_splits( lower_bits_mt_list )          
+                lower_bits_st = lower_bits_mt.read(streams=g.SG1_E[0], time=5)
+
+            
+                # now extract the lower 7 bits of the forst row            
+            
+                # number full of ones used to extract the least significant 7 bits of the chunks
+                bits_extract = int(pow(2, bch.bitchunk))-1
+            
+                dtype = g.int8
+                array_extract_st = g.constant_tensor(lower_bits_mt.shape, dtype, name="bitextract_tensor")
+                array_extract_st.data = np.ones( lower_bits_mt.shape, dtype=np.int8 ) * bits_extract  
+            
+            
+                lower_bits_st = g.bitwise_and( lower_bits_st, array_extract_st, output_streams=g.SG4_E[0], alus=self.and_alu_rq )
+                lower_bits_mt = lower_bits_st.write(name="lower_bits", layout="H1(E), A2, S1(4)")               
+            
+            
+                #lower_bits_mt = row_mt
+            
+                # add memory tensor exclusion excxeption for the used tensors
+                g.add_mem_constraints([result_mt]+row_mt_list+next_row_mt_list+lower_bits_mt_list, [next_row_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
+            
+                g.resolve_storage_requests(brscope)               
+                print( lower_bits_mt.addrs )
+            
+
+            
+
+            
+            
+            
 
         #with g.ResourceScope(name="mmscope2", is_buffered=True, time=None, predecessors=[mmscope]) as mmscope2 :   
 
@@ -89,9 +239,10 @@ class TopLevel(g.Component):  # Create our top level component
             #higher_bits_mt = higher_bits_st.write(name="higher_bits", layout="H1(E), -1, S4")
             result_mt = result_st2.write(name="result", layout="H1(E), -1, S4")
         ''' 
+        
 
 
-        return result_mt
+        return [result_mt, lower_bits_mt]
         #return result_mt, result_mt2
         #return lower_bits_mt, higher_bits_mt
 
@@ -173,7 +324,15 @@ program = g.create_tsp_runner(iop_file)
 t0 = time.time()
 result = program(matrix1=t1_data_8.reshape((num_of_chunks_result,dim)), matrix20=t2_data_8.reshape((bch.num_of_chunks*dim,dim)))
 groq_result = result['result']
+tmp = result['lower_bits']
+tmp2 = groq_result[0].astype(np.int8)
+bits_extract = int(pow(2, bch.bitchunk))-1
+array_extract = np.ones( tmp2.shape, dtype=np.int8 ) * bits_extract  
+tmp2 = np.bitwise_and( tmp2,  array_extract)
 
+print(tmp2[0:10])
+print(tmp[0,0:10])
+print('Groq chip lower bits: '+str(np.allclose(tmp2, tmp, rtol=1e-10, atol=1e-15, equal_nan=True)))
 
 # reshape the test result according to the expected inputs of the bitchunks module
 groq_result = groq_result.reshape( (num_of_chunks_result, 1, bch.num_of_chunks, dim) )

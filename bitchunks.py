@@ -147,10 +147,7 @@ def convert_groq_result_to_double(bit_chunks, exponent):
     # 8-bit reduction of bitchunks preventing overflows
     bit_chunks_8 = bit_chunks.copy()
 
-    array_extract = np.ones( (shape_inp[1], shape_inp[2], shape_inp[3]), dtype=np.int32 ) * bits_extract
-    
-
-    
+    array_extract = np.ones( (shape_inp[1], shape_inp[2], shape_inp[3]), dtype=np.int32 ) * bits_extract  
     for idx in range(chunk_num_in_rows-1):
         extracted_row = np.bitwise_and( bit_chunks_8[idx, :, :, :],  array_extract)
     
@@ -171,7 +168,7 @@ def convert_groq_result_to_double(bit_chunks, exponent):
 
     reduced2 = bit_chunks_8[:,:,0,:].copy()
 
-    array_extract = np.ones( (shape_inp[1], 1, shape_inp[3]), dtype=np.int32 ) * bits_extract
+
 
     for jdx in range(1, chunk_num_in_cols):
         tmp = reduced2.astype(np.int32)
@@ -186,6 +183,7 @@ def convert_groq_result_to_double(bit_chunks, exponent):
 
     reduced_8 = reduced2.copy()
 
+    array_extract = np.ones( (shape_inp[1], 1, shape_inp[3]), dtype=np.int32 ) * bits_extract
     for idx in range(chunk_num_in_rows-1):
         extracted_row = np.bitwise_and( reduced_8[idx, :, :, :],  array_extract)
     
