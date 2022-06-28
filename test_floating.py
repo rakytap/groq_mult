@@ -42,6 +42,21 @@ class TopLevel(g.Component):  # Create our top level component
             #print( mat20_mt.physical_shape)
 
             result_st = self.mm(mat1_mt, mat20_mt, time=0)  #int8 multiplication results on SG4_E[4] when plane 0 is used
+            
+            # while calculationg multiplication, creating some constant data
+            dtype = g.int8
+            bitshift_shape = (1, result_st.shape[1])
+            bitshift_mt = g.constant_tensor(bitshift_shape, dtype, name="bitshift_tensor", layout="H1(W), A2, S1(8)")
+            bitshift_mt.data = np.ones(bitshift_shape, dtype=dtype.to_nptype()) * bch.bitchunk
+            
+            
+            # number full of ones used to extract the least significant 7 bits of the chunks
+            bits_extract = int(pow(2, bch.bitchunk))-1            
+            
+            # array to be used to extract lower 7 bits from a stream tensor
+            array_extract_shape = bitshift_shape
+            array_extract_mt = g.constant_tensor(array_extract_shape, dtype, name="bitextract_tensor")
+            array_extract_mt.data = np.ones( array_extract_shape, dtype=np.int8 ) * bits_extract  
 
 
             print(result_st.shape)
@@ -90,7 +105,7 @@ class TopLevel(g.Component):  # Create our top level component
             row_storreq = g.tensor.create_storage_request(layout="H1(W), A2, S4(0-3)")
             
             # storage request for iteratively used bitshift stream tensor
-            bitshift_storreq = g.tensor.create_storage_request(layout="H1(W), A2, S1(8)")
+            #bitshift_storreq = g.tensor.create_storage_request(layout="H1(W), A2, S1(8)")
             
             
             # data used to read out data for stream tensors from memory
@@ -98,9 +113,10 @@ class TopLevel(g.Component):  # Create our top level component
             split_num = result_mt.physical_shape.splits
             vectors = result_mt.physical_shape.vectors            
             
-            next_row_mt = None    
+            next_row_mt = None
+            extracted_bits_mt_list = []    
             
-            for row_idx in range(1):#range(num_of_chunks_result):
+            for row_idx in range(num_of_chunks_result-1):
                 print('Iteration: row_dx='+str(row_idx))
                 
                 if row_idx == 0:
@@ -126,12 +142,13 @@ class TopLevel(g.Component):  # Create our top level component
                     
                 else:
                 
-                    row_st = next_row_mt.read(streams=g.SG4_E[2], time=None)
+                    row_st = next_row_mt.read(streams=g.SG4_E[2], time=18*row_idx) # 18 clicks needed to do one cylce + 3 cycles of memory control latency
             
                 # now shift the bits of the row 
-                dtype = g.int8
-                bitshift_st = g.constant_tensor(row_st.shape, dtype, name="bitshift_tensor", storage_req=bitshift_storreq)
-                bitshift_st.data = np.ones(row_st.shape, dtype=dtype.to_nptype()) * bch.bitchunk
+                #dtype = g.int8
+                #bitshift_st = g.constant_tensor(row_st.shape, dtype, name="bitshift_tensor", storage_req=bitshift_storreq)
+                #bitshift_st.data = np.ones(row_st.shape, dtype=dtype.to_nptype()) * bch.bitchunk
+                bitshift_st = bitshift_mt.read(streams=g.SG4_E[3], time=None)
             
                 row_st = g.right_shift(row_st, bitshift_st, output_streams=g.SG4_E[2], alus=self.bitshift_alu_rq)
             
@@ -165,11 +182,12 @@ class TopLevel(g.Component):  # Create our top level component
                 #next_row_mt = next_row_st.write(name="next_row", layout="H1(W), A2, S4")   
             
             
-
+                #if row_idx == 1:
+                #    break
             
             
                 #######  extract lower 7 bits of the row and store them into memory  ###########
-            
+                print('extracting lower bits')
                 lower_bits_mt_list = []
                 for split_idx in range(len(split_sizes)):
                     addrs = np.array([g.instruction.parse_address(f"W4-{i+row_idx+split_idx*num_of_chunks_result}") for i in range(1)]).reshape(1, 1)
@@ -178,7 +196,7 @@ class TopLevel(g.Component):  # Create our top level component
                
                 
                 lower_bits_mt = g.concat_inner_splits( lower_bits_mt_list )          
-                lower_bits_st = lower_bits_mt.read(streams=g.SG1_E[0], time=5)
+                lower_bits_st = lower_bits_mt.read(streams=g.SG1_E[0], time=5+row_idx*20)
 
             
                 # now extract the lower 7 bits of the forst row            
@@ -186,25 +204,29 @@ class TopLevel(g.Component):  # Create our top level component
                 # number full of ones used to extract the least significant 7 bits of the chunks
                 bits_extract = int(pow(2, bch.bitchunk))-1
             
-                dtype = g.int8
-                array_extract_st = g.constant_tensor(lower_bits_mt.shape, dtype, name="bitextract_tensor")
-                array_extract_st.data = np.ones( lower_bits_mt.shape, dtype=np.int8 ) * bits_extract  
-            
+                #dtype = g.int8
+                #array_extract_st = g.constant_tensor(lower_bits_mt.shape, dtype, name="bitextract_tensor")
+                #array_extract_st.data = np.ones( lower_bits_mt.shape, dtype=np.int8 ) * bits_extract  
+                array_extract_st = array_extract_mt.read(streams=g.SG4_E[1], time=None) 
             
                 lower_bits_st = g.bitwise_and( lower_bits_st, array_extract_st, output_streams=g.SG4_E[0], alus=self.and_alu_rq )
-                lower_bits_mt = lower_bits_st.write(name="lower_bits", layout="H1(E), A2, S1(4)")               
+                lower_bits_mt = lower_bits_st.write(name=f"lower_bits_{row_idx}", layout="H1(E), A2, S1(0)")
+                if row_idx>0 :
+                    g.add_mem_constraints(extracted_bits_mt_list, [lower_bits_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
+                extracted_bits_mt_list.append( lower_bits_mt )
             
             
                 #lower_bits_mt = row_mt
             
-                # add memory tensor exclusion excxeption for the used tensors
-                g.add_mem_constraints([result_mt]+row_mt_list+next_row_mt_list+lower_bits_mt_list, [next_row_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
+            # add memory tensor exclusion excxeption for the used tensors
+            g.add_mem_constraints([result_mt]+row_mt_list+next_row_mt_list, [next_row_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
             
-                g.resolve_storage_requests(brscope)               
-                print( lower_bits_mt.addrs )
+            
+            g.resolve_storage_requests(brscope)               
+            #print( lower_bits_mt.addrs )
             
 
-            
+            #TODO excract the lower bits from the last row
 
             
             
@@ -242,7 +264,7 @@ class TopLevel(g.Component):  # Create our top level component
         
 
 
-        return [result_mt, lower_bits_mt]
+        return [result_mt] + extracted_bits_mt_list
         #return result_mt, result_mt2
         #return lower_bits_mt, higher_bits_mt
 
@@ -323,9 +345,10 @@ print('Running the code on the Groq chip')
 program = g.create_tsp_runner(iop_file)
 t0 = time.time()
 result = program(matrix1=t1_data_8.reshape((num_of_chunks_result,dim)), matrix20=t2_data_8.reshape((bch.num_of_chunks*dim,dim)))
+#print(result)
 groq_result = result['result']
-tmp = result['lower_bits']
-tmp2 = groq_result[0].astype(np.int8)
+tmp = result['lower_bits_7']
+tmp2 = groq_result[7].astype(np.int8)
 bits_extract = int(pow(2, bch.bitchunk))-1
 array_extract = np.ones( tmp2.shape, dtype=np.int8 ) * bits_extract  
 tmp2 = np.bitwise_and( tmp2,  array_extract)
