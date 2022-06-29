@@ -11,8 +11,8 @@ print("Python packages imported successfully")
 dim = 70
 num_of_chunks_result = 9
 
-matrix1 = g.input_tensor(shape=(num_of_chunks_result, dim), dtype=g.int8, name="matrix1", layout="H1(W), -1, S2(22-23)")
-matrix20 = g.input_tensor(shape=(bch.num_of_chunks*dim, dim), dtype=g.int8, name="matrix20", layout="H1(W), -1, S16")
+matrix1 = g.input_tensor(shape=(num_of_chunks_result, dim), dtype=g.int8, name="matrix1", layout="H1(W), -1, S2(42-43)")
+matrix20 = g.input_tensor(shape=(bch.num_of_chunks*dim, dim), dtype=g.int8, name="matrix20", layout="H1(W), -1, S16(22-41)")
 #matrix21 = g.input_tensor(shape=(bch.num_of_chunks*dim, dim), dtype=g.int8, name="matrix21", layout="H1(E), -1, S16")
 
 class TopLevel(g.Component):  # Create our top level component
@@ -46,7 +46,7 @@ class TopLevel(g.Component):  # Create our top level component
             # while calculationg multiplication, creating some constant data
             dtype = g.int8
             bitshift_shape = (1, result_st.shape[1])
-            bitshift_mt = g.constant_tensor(bitshift_shape, dtype, name="bitshift_tensor", layout="H1(W), A2, S1(8)")
+            bitshift_mt = g.constant_tensor(bitshift_shape, dtype, name="bitshift_tensor", layout="H1(W), A2, S1(9)")
             bitshift_mt.data = np.ones(bitshift_shape, dtype=dtype.to_nptype()) * bch.bitchunk
             
             
@@ -55,7 +55,7 @@ class TopLevel(g.Component):  # Create our top level component
             
             # array to be used to extract lower 7 bits from a stream tensor
             array_extract_shape = bitshift_shape
-            array_extract_mt = g.constant_tensor(array_extract_shape, dtype, name="bitextract_tensor")
+            array_extract_mt = g.constant_tensor(array_extract_shape, dtype, name="bitextract_tensor", layout="H1(W), A2, S1(10)")
             array_extract_mt.data = np.ones( array_extract_shape, dtype=np.int8 ) * bits_extract  
 
 
@@ -228,8 +228,8 @@ class TopLevel(g.Component):  # Create our top level component
                 #array_extract_st.data = np.ones( lower_bits_mt.shape, dtype=np.int8 ) * bits_extract  
                 array_extract_st = array_extract_mt.read(streams=g.SG4_E[1], time=None) 
             
-                lower_bits_st = g.bitwise_and( lower_bits_st, array_extract_st, output_streams=g.SG4_E[0], alus=self.and_alu_rq )
-                lower_bits_mt = lower_bits_st.write(name=f"lower_bits_{row_idx}", layout="H1(E), A2, S1(0)")
+                lower_bits_st = g.bitwise_and( lower_bits_st, array_extract_st, output_streams=g.SG4_W[0], alus=self.and_alu_rq )
+                lower_bits_mt = lower_bits_st.write(name=f"lower_bits_{row_idx}", layout="H1(W), A2, S1(8)")
                 
                 # add memory tensor exclusion excxeption for the used tensors
                 g.add_mem_constraints(extracted_bits_mt_list, [lower_bits_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)     
@@ -252,8 +252,8 @@ class TopLevel(g.Component):  # Create our top level component
                
                
             lower_bits_mt = g.concat_inner_splits( lower_bits_mt_list )          
-            lower_bits_st = lower_bits_mt.read(streams=g.SG1_E[0], time=(num_of_chunks_result-1)*18-1)
-            lower_bits_mt = lower_bits_st.write(name=f"lower_bits_{num_of_chunks_result-1}", layout="H1(E), A2, S1(0)")
+            lower_bits_st = lower_bits_mt.read(streams=g.SG1_W[0], time=(num_of_chunks_result-1)*18-1)
+            lower_bits_mt = lower_bits_st.write(name=f"lower_bits_{num_of_chunks_result-1}", layout="H1(W), A2, S1(8)")
             
             # add memory tensor exclusion excxeption for the used tensors
             g.add_mem_constraints(extracted_bits_mt_list, [lower_bits_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)       
