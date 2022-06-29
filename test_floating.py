@@ -44,9 +44,9 @@ class TopLevel(g.Component):  # Create our top level component
             result_st = self.mm(mat1_mt, mat20_mt, time=0)  #int8 multiplication results on SG4_E[4] when plane 0 is used
             
             # while calculationg multiplication, creating some constant data
-            dtype = g.int8
+            dtype = g.int32
             bitshift_shape = (1, result_st.shape[1])
-            bitshift_mt = g.constant_tensor(bitshift_shape, dtype, name="bitshift_tensor", layout="H1(W), A2, S1(9)")
+            bitshift_mt = g.constant_tensor(bitshift_shape, dtype, name="bitshift_tensor", layout="H1(W), A2, S4(11-14)")
             bitshift_mt.data = np.ones(bitshift_shape, dtype=dtype.to_nptype()) * bch.bitchunk
             
             
@@ -54,10 +54,11 @@ class TopLevel(g.Component):  # Create our top level component
             bits_extract = int(pow(2, bch.bitchunk))-1            
             
             # array to be used to extract lower 7 bits from a stream tensor
+            dtype = g.int8
             array_extract_shape = bitshift_shape
             array_extract_mt = g.constant_tensor(array_extract_shape, dtype, name="bitextract_tensor", layout="H1(W), A2, S1(10)")
             array_extract_mt.data = np.ones( array_extract_shape, dtype=np.int8 ) * bits_extract  
-
+            
 
             print(result_st.shape)
             print(result_st.physical_shape)
@@ -150,6 +151,9 @@ class TopLevel(g.Component):  # Create our top level component
                 #bitshift_st = g.constant_tensor(row_st.shape, dtype, name="bitshift_tensor", storage_req=bitshift_storreq)
                 #bitshift_st.data = np.ones(row_st.shape, dtype=dtype.to_nptype()) * bch.bitchunk
                 bitshift_st = bitshift_mt.read(streams=g.SG4_E[3], time=None)
+                print('uuuuuuuuuuuuuu')
+                print(bitshift_st.physical_shape)            
+
             
                 row_st = g.right_shift(row_st, bitshift_st, output_streams=g.SG4_E[2], alus=self.bitshift_alu_rq)
             
@@ -269,7 +273,7 @@ class TopLevel(g.Component):  # Create our top level component
             
             
             g.resolve_storage_requests(brscope)               
-            #print( lower_bits_mt.addrs )            
+            print( next_row_mt.addrs )            
             
 
         #with g.ResourceScope(name="mmscope2", is_buffered=True, time=None, predecessors=[mmscope]) as mmscope2 :   
@@ -386,32 +390,26 @@ program = g.create_tsp_runner(iop_file)
 t0 = time.time()
 result = program(matrix1=t1_data_8.reshape((num_of_chunks_result,dim)), matrix20=t2_data_8.reshape((bch.num_of_chunks*dim,dim)))
 #print(result)
-groq_result = result['result']
-tmp = result['lower_bits_0']
-tmp2 = groq_result[0].astype(np.int8)
-bits_extract = int(pow(2, bch.bitchunk))-1
-array_extract = np.ones( tmp2.shape, dtype=np.int8 ) * bits_extract  
-tmp2 = np.bitwise_and( tmp2,  array_extract)
+groq_result_mm = result['result']
 
-print( result['lower_bits_0'][0,0:10])
-print( result['lower_bits_1'][0,0:10])
-print( result['lower_bits_2'][0,0:10])
-print( result['lower_bits_3'][0,0:10])
-print( result['lower_bits_4'][0,0:10])
-print( result['lower_bits_5'][0,0:10])
-print( result['lower_bits_6'][0,0:10])
-print( result['lower_bits_7'][0,0:10])
-print( result['lower_bits_8'][0,0:10])
 
-print('Groq chip lower bits: '+str(np.allclose(tmp2, tmp, rtol=1e-10, atol=1e-15, equal_nan=True)))
+groq_result = np.zeros( (num_of_chunks_result, bch.num_of_chunks*dim), dtype=np.int8)
+for idx in range(num_of_chunks_result):
+    groq_result[idx,:] = result[f"lower_bits_{idx}"]
+    
+groq_result = groq_result.reshape((num_of_chunks_result,1,bch.num_of_chunks, dim))
+#print( groq_result_tmp[:,0,0,59:70])
+
+
+   
 
 # reshape the test result according to the expected inputs of the bitchunks module
-groq_result = groq_result.reshape( (num_of_chunks_result, 1, bch.num_of_chunks, dim) )
+groq_result_mm = groq_result_mm.reshape( (num_of_chunks_result, 1, bch.num_of_chunks, dim) )
 mult_result_exponent = exponent_t1_data + exponent_t2_data - bch.double_mantissa_bits # becouse of the multiplication the number of double mantissa bits in combining the 8bit results should be counted twice, hence here we offset the expoentn by the mantissa bit number
 
 
 # recombine chunk into 64bit floats
-groq_result_double = bch.combine_bitchunks_into_double(groq_result, mult_result_exponent)
+groq_result_double = bch.combine_bitchunks_into_double(groq_result_mm, mult_result_exponent)
 
 groq_result_double2, mult_result_exponent_modified = bch.convert_groq_result_to_double(groq_result, mult_result_exponent)
 groq_result_double2 = bch.combine_bitchunks_into_double(groq_result_double2, mult_result_exponent_modified)

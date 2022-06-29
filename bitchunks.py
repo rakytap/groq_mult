@@ -140,10 +140,11 @@ def convert_groq_result_to_double(bit_chunks, exponent):
     chunk_num_in_rows = shape_inp[0]
     chunk_num_in_cols = shape_inp[2]
 
+    
     # number full of ones used to extract the least significant 7 bits of the chunks
     bits_extract = int(pow(2, bitchunk))-1
 
-    
+    '''
     # 8-bit reduction of bitchunks preventing overflows
     bit_chunks_8 = bit_chunks.copy()
 
@@ -163,11 +164,16 @@ def convert_groq_result_to_double(bit_chunks, exponent):
         #print( bit_chunks_8[idx+1,0,0,0:4] )
 
     bit_chunks_8 = bit_chunks_8.astype(np.int8)
-    print(bit_chunks_8[:,0,0,0:10])
+    '''
     
+    
+    bit_chunks_8 = bit_chunks.copy()
+    
+        
     #####return bit_chunks_8, exponent
 
     reduced2 = bit_chunks_8[:,:,0,:].copy()
+    
 
 
 
