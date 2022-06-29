@@ -108,7 +108,7 @@ class TopLevel(g.Component):  # Create our top level component
             #bitshift_storreq = g.tensor.create_storage_request(layout="H1(W), A2, S1(8)")
             
             
-            # data used to read out data for stream tensors from memory
+            # some data used to read out data for stream tensors from memory
             split_sizes = result_mt.physical_shape.inner_dims
             split_num = result_mt.physical_shape.splits
             vectors = result_mt.physical_shape.vectors            
@@ -121,7 +121,7 @@ class TopLevel(g.Component):  # Create our top level component
                 
                 if row_idx == 0:
             
-                    # first create a stream tensor from the row of the stream
+                    # first create a stream tensor from the row of the memory tensor
                     row_mt_list = []
                     for split_idx in range(len(split_sizes)):
                         addrs_0 = np.array([g.instruction.parse_address(f"W4-{i+row_idx+split_idx*num_of_chunks_result}") for i in range(1)]).reshape(1, 1)
@@ -142,7 +142,8 @@ class TopLevel(g.Component):  # Create our top level component
                     
                 else:
                 
-                    row_st = next_row_mt.read(streams=g.SG4_E[2], time=18*row_idx) # 18 clicks needed to do one cylce + 3 cycles of memory control latency
+                    # use the rox created in the previous iteration
+                    row_st = next_row_mt.read(streams=g.SG4_E[2], time=18*row_idx) # 15 clicks needed to do one cylce + 3 cycles of memory control latency
             
                 # now shift the bits of the row 
                 #dtype = g.int8
@@ -188,21 +189,39 @@ class TopLevel(g.Component):  # Create our top level component
             
                 #######  extract lower 7 bits of the row and store them into memory  ###########
                 print('extracting lower bits')
-                lower_bits_mt_list = []
-                for split_idx in range(len(split_sizes)):
-                    addrs = np.array([g.instruction.parse_address(f"W4-{i+row_idx+split_idx*num_of_chunks_result}") for i in range(1)]).reshape(1, 1)
-                    print(addrs)                
-                    lower_bits_mt_list.append( g.from_addresses(addrs, inner_dim=split_sizes[split_idx], dtype=g.int8, name='lower_bits_mt'+str(split_idx))  )                
+                if row_idx==0:
+                    lower_bits_mt_list = []
+                    for split_idx in range(len(split_sizes)):
+                        addrs = np.array([g.instruction.parse_address(f"W4-{i+row_idx+split_idx*num_of_chunks_result}") for i in range(1)]).reshape(1, 1)
+                        print(addrs)                
+                        lower_bits_mt_list.append( g.from_addresses(addrs, inner_dim=split_sizes[split_idx], dtype=g.int8, name='lower_bits_mt_'+str(split_idx))  )                
                
                 
-                lower_bits_mt = g.concat_inner_splits( lower_bits_mt_list )          
-                lower_bits_st = lower_bits_mt.read(streams=g.SG1_E[0], time=5+row_idx*20)
+                    lower_bits_mt = g.concat_inner_splits( lower_bits_mt_list )          
+                    lower_bits_st = lower_bits_mt.read(streams=g.SG1_E[0], time=5)
+                    
+                    
+                else:
+                    lower_bits_mt_list = []
+                    for split_idx in range(len(split_sizes)):
+                        addrs = np.array([g.instruction.parse_address(f"W0-{split_idx}")]).reshape(1, 1)
+                        print(addrs)                
+                        lower_bits_mt_list.append( g.from_addresses(addrs, inner_dim=split_sizes[split_idx], dtype=g.int8, name='lower_bits_mt_'+str(split_idx)+'_'+str(row_idx))  )                
+               
+               
+                    lower_bits_mt = g.concat_inner_splits( lower_bits_mt_list )          
+                    lower_bits_st = lower_bits_mt.read(streams=g.SG1_E[0], time=2+row_idx*18)
+                    
+                    # add memory tensor exclusion excxeption for the used tensors
+                    g.add_mem_constraints(lower_bits_mt_list, [next_row_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
+                
+
 
             
                 # now extract the lower 7 bits of the forst row            
             
                 # number full of ones used to extract the least significant 7 bits of the chunks
-                bits_extract = int(pow(2, bch.bitchunk))-1
+                #bits_extract = int(pow(2, bch.bitchunk))-1
             
                 #dtype = g.int8
                 #array_extract_st = g.constant_tensor(lower_bits_mt.shape, dtype, name="bitextract_tensor")
@@ -211,25 +230,46 @@ class TopLevel(g.Component):  # Create our top level component
             
                 lower_bits_st = g.bitwise_and( lower_bits_st, array_extract_st, output_streams=g.SG4_E[0], alus=self.and_alu_rq )
                 lower_bits_mt = lower_bits_st.write(name=f"lower_bits_{row_idx}", layout="H1(E), A2, S1(0)")
-                if row_idx>0 :
-                    g.add_mem_constraints(extracted_bits_mt_list, [lower_bits_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
+                
+                # add memory tensor exclusion excxeption for the used tensors
+                g.add_mem_constraints(extracted_bits_mt_list, [lower_bits_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)     
+            
                 extracted_bits_mt_list.append( lower_bits_mt )
             
             
                 #lower_bits_mt = row_mt
             
+
+            
+
+            # excract the lower 8 bits from the last row (together with the sign bit)
+            print('extracting lower bits --- last row')
+            lower_bits_mt_list = []
+            for split_idx in range(len(split_sizes)):
+                addrs = np.array([g.instruction.parse_address(f"W0-{split_idx}")]).reshape(1, 1)
+                print(addrs)                
+                lower_bits_mt_list.append( g.from_addresses(addrs, inner_dim=split_sizes[split_idx], dtype=g.int8, name='lower_bits_mt_'+str(split_idx)+'_'+str(num_of_chunks_result-1))  )                
+               
+               
+            lower_bits_mt = g.concat_inner_splits( lower_bits_mt_list )          
+            lower_bits_st = lower_bits_mt.read(streams=g.SG1_E[0], time=(num_of_chunks_result-1)*18-1)
+            lower_bits_mt = lower_bits_st.write(name=f"lower_bits_{num_of_chunks_result-1}", layout="H1(E), A2, S1(0)")
+            
             # add memory tensor exclusion excxeption for the used tensors
-            g.add_mem_constraints([result_mt]+row_mt_list+next_row_mt_list, [next_row_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
+            g.add_mem_constraints(extracted_bits_mt_list, [lower_bits_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)       
+            
+            extracted_bits_mt_list.append( lower_bits_mt )
+                    
+            # add memory tensor exclusion excxeption for the used tensors
+            g.add_mem_constraints(lower_bits_mt_list, [next_row_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)            
+
+            
+            # add memory tensor exclusion excxeption for the used tensors
+            g.add_mem_constraints([result_mt]+row_mt_list+next_row_mt_list+lower_bits_mt_list, [next_row_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
             
             
             g.resolve_storage_requests(brscope)               
-            #print( lower_bits_mt.addrs )
-            
-
-            #TODO excract the lower bits from the last row
-
-            
-            
+            #print( lower_bits_mt.addrs )            
             
 
         #with g.ResourceScope(name="mmscope2", is_buffered=True, time=None, predecessors=[mmscope]) as mmscope2 :   
@@ -347,14 +387,22 @@ t0 = time.time()
 result = program(matrix1=t1_data_8.reshape((num_of_chunks_result,dim)), matrix20=t2_data_8.reshape((bch.num_of_chunks*dim,dim)))
 #print(result)
 groq_result = result['result']
-tmp = result['lower_bits_7']
-tmp2 = groq_result[7].astype(np.int8)
+tmp = result['lower_bits_0']
+tmp2 = groq_result[0].astype(np.int8)
 bits_extract = int(pow(2, bch.bitchunk))-1
 array_extract = np.ones( tmp2.shape, dtype=np.int8 ) * bits_extract  
 tmp2 = np.bitwise_and( tmp2,  array_extract)
 
-print(tmp2[0:10])
-print(tmp[0,0:10])
+print( result['lower_bits_0'][0,0:10])
+print( result['lower_bits_1'][0,0:10])
+print( result['lower_bits_2'][0,0:10])
+print( result['lower_bits_3'][0,0:10])
+print( result['lower_bits_4'][0,0:10])
+print( result['lower_bits_5'][0,0:10])
+print( result['lower_bits_6'][0,0:10])
+print( result['lower_bits_7'][0,0:10])
+print( result['lower_bits_8'][0,0:10])
+
 print('Groq chip lower bits: '+str(np.allclose(tmp2, tmp, rtol=1e-10, atol=1e-15, equal_nan=True)))
 
 # reshape the test result according to the expected inputs of the bitchunks module

@@ -163,6 +163,7 @@ def convert_groq_result_to_double(bit_chunks, exponent):
         #print( bit_chunks_8[idx+1,0,0,0:4] )
 
     bit_chunks_8 = bit_chunks_8.astype(np.int8)
+    print(bit_chunks_8[:,0,0,0:10])
     
     #####return bit_chunks_8, exponent
 
