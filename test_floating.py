@@ -15,6 +15,61 @@ matrix1 = g.input_tensor(shape=(num_of_chunks_result, dim), dtype=g.int8, name="
 matrix20 = g.input_tensor(shape=(bch.num_of_chunks*dim, dim), dtype=g.int8, name="matrix20", layout="H1(W), -1, S16(22-41)")
 #matrix21 = g.input_tensor(shape=(bch.num_of_chunks*dim, dim), dtype=g.int8, name="matrix21", layout="H1(E), -1, S16")
 
+
+# component to shift elements in the matrix over the inner dimension
+class ElementShift(g.Component):  # Create our top level component
+
+
+    def __init__(self, perm_rq, add_alu_rq, **kwargs):
+        super().__init__(**kwargs)
+    
+        # ALU request for element-wise and operations (The resource is reused within iterative calls)
+        self.add_alu_rq = add_alu_rq   
+        
+        # resource request for element shifting over inner dimension
+        self.perm_rq = perm_rq
+        
+    
+    
+    def build(self, row_orig_mt, addrs_upper_half, split_sizes):   #Provide input matrices and a default time    
+
+            row_orig_st  = row_orig_mt.read(streams=g.SG1_W[0], time=0)
+            
+            addrs_upper_half = np.array([g.instruction.parse_address(f"W8-1")]).reshape(1, 1)
+            row_upper_half_orig_mt = g.from_addresses(addrs_upper_half, inner_dim=split_sizes[1], dtype=g.int8, name='row_upper_half_orig_0')
+            row_upper_half_orig_st = row_upper_half_orig_mt.read(streams=g.SG1_W[0], time=2)
+            
+            # add memory tensor exclusion excxeption for the used tensors
+            g.add_mem_constraints([row_orig_mt], [row_upper_half_orig_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)       
+                    
+            row_shifted_st            = g.shift(row_orig_st, 70, permutor_id=self.perm_rq, shift_src=[g.instruction.NEW_SRC], output_streams=g.SG1_E[0])
+            row_upper_half_shifted_st = g.shift(row_upper_half_orig_st, 70-320, permutor_id=self.perm_rq, shift_src=[g.instruction.NEW_SRC], output_streams=g.SG1_E[0])
+            
+            # buffer shifted data to feed them to ALU in the same time
+            row_shifted_mt            = row_shifted_st.write(name="shifted_data_buffered", layout="H1(W), A2, S1(41)")
+            row_upper_half_shifted_mt = row_upper_half_shifted_st.write(name="row_upper_half_shifted_0", layout="H1(W), A2, S1(42)")
+            
+            # padding result_data2_st with a zero split
+            dtype = g.int8
+            zeros_shape = (1, split_sizes[1])
+            zeros_mt = g.constant_tensor(zeros_shape, dtype, name="zeros_tensor", layout="H1(W), A2, S1(43)")
+            zeros_mt.data = np.zeros(zeros_shape, dtype=dtype.to_nptype())
+            
+            row_upper_half_shifted_mt  = g.concat_inner_splits( [row_upper_half_shifted_mt, zeros_mt])
+            row_upper_half_shifted_mt.name = "shifted_data2"
+            
+            
+            row_shifted_st            = row_shifted_mt.read(streams=g.SG4_E[1], time=None)
+            row_upper_half_shifted_st = row_upper_half_shifted_mt.read(streams=g.SG4_E[0], time=None)
+                      
+            
+            row_shifted_st = g.add( row_shifted_st, row_upper_half_shifted_st, output_streams=g.SG4_W[2], alus=self.add_alu_rq, time=52)
+            row_shifted_mt = row_shifted_st.write(name="shifted_row_0", layout="H1(W), A2, S1(40)")
+
+            return row_shifted_mt
+
+
+
 class TopLevel(g.Component):  # Create our top level component
     def __init__(self):
         super().__init__()
@@ -35,6 +90,8 @@ class TopLevel(g.Component):  # Create our top level component
            
 
 
+        self.el_shift = ElementShift( self.perm_rq, self.add_alu_rq ) 
+
 
     def build(self, mat1_mt, mat20_mt, time=0):   #Provide input matrices and a default time
     #def build(self, mat1_mt, mat20_mt, mat21_mt, time=0):   #Provide input matrices and a default time
@@ -47,22 +104,7 @@ class TopLevel(g.Component):  # Create our top level component
 
             result_st = self.mm(mat1_mt, mat20_mt, time=0)  #int8 multiplication results on SG4_E[4] when plane 0 is used
             
-            # while calculationg multiplication, creating some constant data
-            dtype = g.int32
-            bitshift_shape = (1, result_st.shape[1])
-            bitshift_mt = g.constant_tensor(bitshift_shape, dtype, name="bitshift_tensor", layout="H1(W), A2, S4(11-14)")
-            bitshift_mt.data = np.ones(bitshift_shape, dtype=dtype.to_nptype()) * bch.bitchunk
-            
-            
-            # number full of ones used to extract the least significant 7 bits of the chunks
-            bits_extract = int(pow(2, bch.bitchunk))-1            
-            
-            # array to be used to extract lower 7 bits from a stream tensor
-            dtype = g.int8
-            array_extract_shape = bitshift_shape
-            array_extract_mt = g.constant_tensor(array_extract_shape, dtype, name="bitextract_tensor", layout="H1(W), A2, S1(10)")
-            array_extract_mt.data = np.ones( array_extract_shape, dtype=np.int8 ) * bits_extract  
-            
+           
 
             print(result_st.shape)
             print(result_st.physical_shape)
@@ -110,7 +152,7 @@ class TopLevel(g.Component):  # Create our top level component
             row_storreq = g.tensor.create_storage_request(layout="H1(W), A2, S4(0-3)")
             
             # storage request for iteratively used bitshift stream tensor
-            #bitshift_storreq = g.tensor.create_storage_request(layout="H1(W), A2, S1(8)")
+            bitshift_storreq = g.tensor.create_storage_request(layout="H1(W), A2, S4(11-14)")
             
             
             # some data used to read out data for stream tensors from memory
@@ -120,6 +162,22 @@ class TopLevel(g.Component):  # Create our top level component
             
             next_row_mt = None
             extracted_bits_mt_list = []    
+            
+            # while calculationg multiplication, creating some constant data
+            dtype = g.int32
+            bitshift_shape = (1, result_st.shape[1])
+            bitshift_mt = g.constant_tensor(bitshift_shape, dtype, name="bitshift_tensor", layout="H1(W), A2, S4(11-14)")
+            bitshift_mt.data = np.ones(bitshift_shape, dtype=dtype.to_nptype()) * bch.bitchunk
+            
+            
+            # number full of ones used to extract the least significant 7 bits of the chunks
+            bits_extract = int(pow(2, bch.bitchunk))-1            
+            
+            # array to be used to extract lower 7 bits from a stream tensor
+            dtype = g.int8
+            array_extract_shape = bitshift_shape
+            array_extract_mt = g.constant_tensor(array_extract_shape, dtype, name="bitextract_tensor", layout="H1(W), A2, S1(10)")
+            array_extract_mt.data = np.ones( array_extract_shape, dtype=np.int8 ) * bits_extract         
             
             for row_idx in range(num_of_chunks_result-1):
                 print('Iteration: row_dx='+str(row_idx))
@@ -150,10 +208,7 @@ class TopLevel(g.Component):  # Create our top level component
                     # use the rox created in the previous iteration
                     row_st = next_row_mt.read(streams=g.SG4_E[2], time=18*row_idx) # 15 clicks needed to do one cylce + 3 cycles of memory control latency
             
-                # now shift the bits of the row 
-                #dtype = g.int8
-                #bitshift_st = g.constant_tensor(row_st.shape, dtype, name="bitshift_tensor", storage_req=bitshift_storreq)
-                #bitshift_st.data = np.ones(row_st.shape, dtype=dtype.to_nptype()) * bch.bitchunk
+
                 bitshift_st = bitshift_mt.read(streams=g.SG4_E[3], time=None)   
 
             
@@ -283,51 +338,17 @@ class TopLevel(g.Component):  # Create our top level component
         # component to shift element along the inner dimension by amount of dim
         with g.ResourceScope(name="sftscope", is_buffered=True, time=None,  predecessors=[brscope]) as sftscope :  
          
-            print('***************** sftscope scope **********************')
+            print('***************** sftscope scope **********************')            
             
             row_orig_mt = extracted_bits_mt_list[0]
-            row_orig_st  = row_orig_mt.read(streams=g.SG1_W[0], time=0)
-            
-            
             addrs = np.array([g.instruction.parse_address(f"W8-1")]).reshape(1, 1)
-            row_upper_half_orig_mt = g.from_addresses(addrs, inner_dim=split_sizes[1], dtype=g.int8, name='row_upper_half_orig_0')
-            row_upper_half_orig_st = row_upper_half_orig_mt.read(streams=g.SG1_W[0], time=2)
-            
-            # add memory tensor exclusion excxeption for the used tensors
-            g.add_mem_constraints(extracted_bits_mt_list, [row_upper_half_orig_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)       
-                    
-            row_shifted_st            = g.shift(row_orig_st, 70, permutor_id=self.perm_rq, shift_src=[g.instruction.NEW_SRC], output_streams=g.SG1_E[0])
-            row_upper_half_shifted_st = g.shift(row_upper_half_orig_st, 70-320, permutor_id=self.perm_rq, shift_src=[g.instruction.NEW_SRC], output_streams=g.SG1_E[0])
-            
-            # buffer shifted data to feed them to ALU in the same time
-            row_shifted_mt            = row_shifted_st.write(name="shifted_data_buffered", layout="H1(W), A2, S1(41)")
-            row_upper_half_shifted_mt = row_upper_half_shifted_st.write(name="row_upper_half_shifted_0", layout="H1(W), A2, S1(42)")
-            
-            # padding result_data2_st with a zero split
-            dtype = g.int8
-            zeros_shape = (1, split_sizes[1])
-            zeros_mt = g.constant_tensor(zeros_shape, dtype, name="zeros_tensor", layout="H1(W), A2, S1(43)")
-            zeros_mt.data = np.zeros(zeros_shape, dtype=dtype.to_nptype())
-            
-            row_upper_half_shifted_mt  = g.concat_inner_splits( [row_upper_half_shifted_mt, zeros_mt])
-            row_upper_half_shifted_mt.name = "shifted_data2"
+            row_shifted_mt = self.el_shift( row_orig_mt, addrs, split_sizes)           
             
             
-            row_shifted_st            = row_shifted_mt.read(streams=g.SG4_E[1], time=None)
-            row_upper_half_shifted_st = row_upper_half_shifted_mt.read(streams=g.SG4_E[0], time=None)
-                      
-            
-            row_shifted_st = g.add( row_shifted_st, row_upper_half_shifted_st, output_streams=g.SG4_W[2], alus=self.add_alu_rq, time=52)
-            row_shifted_mt = row_shifted_st.write(name="shifted_row_0", layout="H1(W), A2, S1(40)")
-            
-            
-            g.resolve_storage_requests(sftscope)  
-            print(row_upper_half_shifted_st.shape)
-            print(row_orig_mt.addrs)
-            print(row_upper_half_orig_mt.addrs)            
+            #g.resolve_storage_requests(sftscope)             
         
 
-        return [result_mt] + extracted_bits_mt_list + [row_shifted_mt, row_upper_half_shifted_mt]
+        return [result_mt] + extracted_bits_mt_list + [row_shifted_mt]
         #return result_mt, result_mt2
         #return lower_bits_mt, higher_bits_mt
 
@@ -411,13 +432,13 @@ result = program(matrix1=t1_data_8.reshape((num_of_chunks_result,dim)), matrix20
 print(result.keys())
 groq_result_mm = result['result']
 shifted_data = result['shifted_row_0']
-shifted_data2 = result['shifted_data2']
+#shifted_data2 = result['shifted_data2']
 print(shifted_data.shape)
 print(result["lower_bits_0"])
 print(' ')
 print(shifted_data)
-print(' ')
-print(shifted_data2)
+#print(' ')
+#print(shifted_data2)
 
 
 groq_result = np.zeros( (num_of_chunks_result, bch.num_of_chunks*dim), dtype=np.int8)
