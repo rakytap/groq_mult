@@ -206,6 +206,67 @@ def convert_groq_result_to_double(bit_chunks, exponent):
 
     return reduced_8, exponent_modified
     
+    
+    
+# function to prototype the combination of groq result into the final result returned to the CPU -- this logic should be implemented on the Groq chip
+# the shape of the input should be (number of chunks in rows, number of rows in one chunk, number of chunks in cols, number of cols in one chunk)
+def convert_groq_result_to_double2(bit_chunks, exponent):
+
+    shape_inp = bit_chunks.shape
+    chunk_num_in_rows = shape_inp[0]
+    chunk_num_in_cols = shape_inp[2]
+
+    
+    # number full of ones used to extract the least significant 7 bits of the chunks
+    bits_extract = int(pow(2, bitchunk))-1
+
+    # 8-bit reduction of bitchunks preventing overflows
+    bit_chunks_8 = bit_chunks.copy()
+
+    array_extract = np.ones( (shape_inp[1], shape_inp[2], shape_inp[3]), dtype=np.int32 ) * bits_extract  
+    for idx in range(chunk_num_in_rows-1):
+        extracted_row = np.bitwise_and( bit_chunks_8[idx, :, :, :],  array_extract)
+    
+        #print( extracted_row[0,0,0:4] )
+        #print( bit_chunks[idx,0,0,0:4] )
+        #print( bit_chunks[idx+1,0,0,0:4] )
+    
+        bit_chunks_8[idx, :, :, :] = np.right_shift(bit_chunks_8[idx, :, :, :], bitchunk)
+        bit_chunks_8[idx+1, :, :, :] = bit_chunks_8[idx+1, :, :, :] + bit_chunks_8[idx, :, :, :]
+        bit_chunks_8[idx+1, :, 0:chunk_num_in_cols-1, :] = bit_chunks_8[idx+1, :, 0:chunk_num_in_cols-1, :] + extracted_row[:,1:chunk_num_in_cols,:]
+        #print( bit_chunks_8[idx+1, :, :, 1:10])
+
+        #print( bit_chunks_8[idx,0,0,0:4] )
+        #print( bit_chunks_8[idx+1,0,0,0:4] )
+
+    #bit_chunks_8 = bit_chunks_8.astype(np.int8)
+    
+    
+    reduced_8 = bit_chunks_8[chunk_num_in_rows-1, :, :, :]
+    extracted_row = np.bitwise_and( reduced_8[:, :, :],  array_extract)
+    reduced_8[:, :, :] = np.right_shift(reduced_8[:, :, :], bitchunk)
+    reduced_8[:, 0:chunk_num_in_cols-1, :] = reduced_8[:, 0:chunk_num_in_cols-1, :] + extracted_row[:,1:chunk_num_in_cols,:]
+     
+    
+    #print(reduced_8[:, :, 1:10])
+    
+    
+    reducued_8 = reduced_8.astype(np.int8)
+    #print('ooooooooooo')
+    #print(reduced_8[:, :, 1:10])
+    
+    reduced_8 = reduced_8.reshape((chunk_num_in_rows, shape_inp[1], 1, shape_inp[3]))  
+        
+    exponent_modified = exponent + bitchunk*(chunk_num_in_cols-1) + bitchunk
+
+    ####return reduced2, exponent_modified
+
+
+
+    
+
+    return reduced_8, exponent_modified
+        
 
 
 

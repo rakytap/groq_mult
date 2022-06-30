@@ -28,7 +28,11 @@ class TopLevel(g.Component):  # Create our top level component
         self.add_alu_rq = g.tensor.create_alu_request(alus=[1])     
         
         # ALU request for element-wise and operations (The resource is reused within iterative calls)
-        self.and_alu_rq = g.tensor.create_alu_request(alus=[0])                
+        self.and_alu_rq = g.tensor.create_alu_request(alus=[0])    
+        
+        # resource request for element shifting over inner dimension
+        self.perm_rq = g.tensor.create_permutor_request(perm=[0], num_perm=1)
+           
 
 
 
@@ -150,9 +154,7 @@ class TopLevel(g.Component):  # Create our top level component
                 #dtype = g.int8
                 #bitshift_st = g.constant_tensor(row_st.shape, dtype, name="bitshift_tensor", storage_req=bitshift_storreq)
                 #bitshift_st.data = np.ones(row_st.shape, dtype=dtype.to_nptype()) * bch.bitchunk
-                bitshift_st = bitshift_mt.read(streams=g.SG4_E[3], time=None)
-                print('uuuuuuuuuuuuuu')
-                print(bitshift_st.physical_shape)            
+                bitshift_st = bitshift_mt.read(streams=g.SG4_E[3], time=None)   
 
             
                 row_st = g.right_shift(row_st, bitshift_st, output_streams=g.SG4_E[2], alus=self.bitshift_alu_rq)
@@ -272,43 +274,60 @@ class TopLevel(g.Component):  # Create our top level component
             g.add_mem_constraints([result_mt]+row_mt_list+next_row_mt_list+lower_bits_mt_list, [next_row_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
             
             
-            g.resolve_storage_requests(brscope)               
-            print( next_row_mt.addrs )            
+            #g.resolve_storage_requests(brscope)               
+            #print( next_row_mt.addrs )            
             
-
-        #with g.ResourceScope(name="mmscope2", is_buffered=True, time=None, predecessors=[mmscope]) as mmscope2 :   
-
-        '''
-        with g.ResourceScope(name="bsscope", is_buffered=True, time=None, predecessors=[mmscope]) as bsscope :   
-
-            lower_bits_st  = lower_bits_mt.read(streams=g.SG4_E[0])
-            higher_bits_st = higher_bits_mt.read(streams=g.SG4_E[4])
+   
+    
+                   
+        # component to shift element along the inner dimension by amount of dim
+        with g.ResourceScope(name="sftscope", is_buffered=True, time=None,  predecessors=[brscope]) as sftscope :  
+         
+            print('***************** sftscope scope **********************')
+            
+            row_orig_mt = extracted_bits_mt_list[0]
+            row_orig_st  = row_orig_mt.read(streams=g.SG1_W[0], time=0)
             
             
-            shape = (1,dim)
-            shape2 = (1,2*dim)
+            addrs = np.array([g.instruction.parse_address(f"W8-1")]).reshape(1, 1)
+            row_upper_half_orig_mt = g.from_addresses(addrs, inner_dim=split_sizes[1], dtype=g.int8, name='row_upper_half_orig_0')
+            row_upper_half_orig_st = row_upper_half_orig_mt.read(streams=g.SG1_W[0], time=2)
+            
+            # add memory tensor exclusion excxeption for the used tensors
+            g.add_mem_constraints(extracted_bits_mt_list, [row_upper_half_orig_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)       
+                    
+            row_shifted_st            = g.shift(row_orig_st, 70, permutor_id=self.perm_rq, shift_src=[g.instruction.NEW_SRC], output_streams=g.SG1_E[0])
+            row_upper_half_shifted_st = g.shift(row_upper_half_orig_st, 70-320, permutor_id=self.perm_rq, shift_src=[g.instruction.NEW_SRC], output_streams=g.SG1_E[0])
+            
+            # buffer shifted data to feed them to ALU in the same time
+            row_shifted_mt            = row_shifted_st.write(name="shifted_data_buffered", layout="H1(W), A2, S1(41)")
+            row_upper_half_shifted_mt = row_upper_half_shifted_st.write(name="row_upper_half_shifted_0", layout="H1(W), A2, S1(42)")
+            
+            # padding result_data2_st with a zero split
             dtype = g.int8
-            bitshift_higher_bits_st = g.constant_tensor(shape2, dtype, name="bitshift_tensor")
-            bitshift_higher_bits_st.data = np.concatenate( (np.ones(shape, dtype=dtype.to_nptype() ) * bch.bitchunk, np.ones(shape, dtype=dtype.to_nptype() ) * 2*bch.bitchunk), axis=1 )
+            zeros_shape = (1, split_sizes[1])
+            zeros_mt = g.constant_tensor(zeros_shape, dtype, name="zeros_tensor", layout="H1(W), A2, S1(43)")
+            zeros_mt.data = np.zeros(zeros_shape, dtype=dtype.to_nptype())
             
-            bitshift_lower_bits_st = g.constant_tensor(shape2, dtype, name="bitshift_tensor")
-            bitshift_lower_bits_st.data = np.concatenate( (np.zeros(shape, dtype=dtype.to_nptype() ), np.ones(shape, dtype=dtype.to_nptype() ) * bch.bitchunk), axis=1 )
+            row_upper_half_shifted_mt  = g.concat_inner_splits( [row_upper_half_shifted_mt, zeros_mt])
+            row_upper_half_shifted_mt.name = "shifted_data2"
             
-
-           
-            higher_bits_st = g.left_shift(higher_bits_st, bitshift_higher_bits_st, output_streams=g.SG4_E[2], alus=[4])
-            lower_bits_st  = g.left_shift(lower_bits_st, bitshift_lower_bits_st, output_streams=g.SG4_E[0], alus=[0])
-
-            result_st2 = g.add(higher_bits_st, lower_bits_st, output_streams=g.SG4_E[0], alus=[1])
-
-            #lower_bits_mt  = lower_bits_st.write(name="lower_bits", layout="H1(E), -1, S4")
-            #higher_bits_mt = higher_bits_st.write(name="higher_bits", layout="H1(E), -1, S4")
-            result_mt = result_st2.write(name="result", layout="H1(E), -1, S4")
-        ''' 
+            
+            row_shifted_st            = row_shifted_mt.read(streams=g.SG4_E[1], time=None)
+            row_upper_half_shifted_st = row_upper_half_shifted_mt.read(streams=g.SG4_E[0], time=None)
+                      
+            
+            row_shifted_st = g.add( row_shifted_st, row_upper_half_shifted_st, output_streams=g.SG4_W[2], alus=self.add_alu_rq, time=52)
+            row_shifted_mt = row_shifted_st.write(name="shifted_row_0", layout="H1(W), A2, S1(40)")
+            
+            
+            g.resolve_storage_requests(sftscope)  
+            print(row_upper_half_shifted_st.shape)
+            print(row_orig_mt.addrs)
+            print(row_upper_half_orig_mt.addrs)            
         
 
-
-        return [result_mt] + extracted_bits_mt_list
+        return [result_mt] + extracted_bits_mt_list + [row_shifted_mt, row_upper_half_shifted_mt]
         #return result_mt, result_mt2
         #return lower_bits_mt, higher_bits_mt
 
@@ -389,8 +408,16 @@ print('Running the code on the Groq chip')
 program = g.create_tsp_runner(iop_file)
 t0 = time.time()
 result = program(matrix1=t1_data_8.reshape((num_of_chunks_result,dim)), matrix20=t2_data_8.reshape((bch.num_of_chunks*dim,dim)))
-#print(result)
+print(result.keys())
 groq_result_mm = result['result']
+shifted_data = result['shifted_row_0']
+shifted_data2 = result['shifted_data2']
+print(shifted_data.shape)
+print(result["lower_bits_0"])
+print(' ')
+print(shifted_data)
+print(' ')
+print(shifted_data2)
 
 
 groq_result = np.zeros( (num_of_chunks_result, bch.num_of_chunks*dim), dtype=np.int8)
@@ -409,10 +436,17 @@ mult_result_exponent = exponent_t1_data + exponent_t2_data - bch.double_mantissa
 
 
 # recombine chunk into 64bit floats
+t0b = time.time()
 groq_result_double = bch.combine_bitchunks_into_double(groq_result_mm, mult_result_exponent)
+print("Groq recombination time: " + str( time.time()-t0b) )
 
+t0b = time.time()
 groq_result_double2, mult_result_exponent_modified = bch.convert_groq_result_to_double(groq_result, mult_result_exponent)
 groq_result_double2 = bch.combine_bitchunks_into_double(groq_result_double2, mult_result_exponent_modified)
+print("Groq recombination time 2: " + str( time.time()-t0b) )
+
+groq_result_double3, mult_result_exponent_modified3 = bch.convert_groq_result_to_double2(groq_result_mm, mult_result_exponent)
+groq_result_double3 = bch.combine_bitchunks_into_double(groq_result_double3, mult_result_exponent_modified3)
 
 
 print("Groq time: " + str( time.time()-t0) )
@@ -424,8 +458,10 @@ print("Groq time: " + str( time.time()-t0) )
 print("Matrix Multiplication for input tensors of size {} x {}.  Results are: ".format(t1_data.shape, t2_data.shape))
 print('Groq chip matmul: '+str(np.allclose(mult_result, groq_result_double, rtol=1e-10, atol=1e-15, equal_nan=True)))
 print('Groq chip matmul: '+str(np.allclose(mult_result, groq_result_double2, rtol=1e-10, atol=1e-15, equal_nan=True)))
+print('Groq chip matmul: '+str(np.allclose(mult_result, groq_result_double3, rtol=1e-10, atol=1e-15, equal_nan=True)))
 print(groq_result_double[0,1:4])
 print(groq_result_double2[0,1:4])
+print(groq_result_double3[0,1:4])
 print(mult_result[0,1:4])
 #print(t1_data)
 
