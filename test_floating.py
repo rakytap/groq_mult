@@ -194,7 +194,7 @@ class TopLevel(g.Component):  # Create our top level component
             # while calculationg multiplication, creating some constant data
             dtype = g.int32
             bitshift_shape = (1, 320*bch.num_of_chunks)
-            bitshift_mt = g.constant_tensor(bitshift_shape, dtype, name="bitshift_tensor", layout="H1(W), A9, S4(18-22)")
+            bitshift_mt = g.constant_tensor(bitshift_shape, dtype, name="bitshift_tensor", layout="H1(W), A9, S4(13-17)")
             bitshift_mt.data = np.ones(bitshift_shape, dtype=dtype.to_nptype()) * bch.bitchunk
             
             
@@ -204,7 +204,7 @@ class TopLevel(g.Component):  # Create our top level component
             # array to be used to extract lower 7 bits from a stream tensor
             dtype = g.int8
             array_extract_shape = bitshift_shape
-            array_extract_mt = g.constant_tensor(array_extract_shape, dtype, name="bitextract_tensor", layout="H1(W), A9, S1(17)")
+            array_extract_mt = g.constant_tensor(array_extract_shape, dtype, name="bitextract_tensor", layout="H1(W), A9, S1(12)")
             array_extract_mt.data = np.ones( array_extract_shape, dtype=np.int8 ) * bits_extract         
             
            
@@ -275,7 +275,7 @@ class TopLevel(g.Component):  # Create our top level component
                 array_extract_st = array_extract_mt.read(streams=g.SG4_E[5], time=None) 
             
                 lower_bits_st = g.bitwise_and( lower_bits_st, array_extract_st, output_streams=g.SG4_W[4], alus=self.and_alu_rq )
-                lower_bits_mt = lower_bits_st.write(name=f"lower_bits_{row_idx}", layout="H1(W), A9, S1(12)")
+                lower_bits_mt = lower_bits_st.write(name=f"lower_bits_{row_idx}", layout="H1(W), A9, S1(18)")
                 
                 # add memory tensor exclusion excxeption for the used tensors
                 g.add_mem_constraints(extracted_bits_mt_list+[result_mt], [lower_bits_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)     
@@ -314,7 +314,7 @@ class TopLevel(g.Component):  # Create our top level component
             #row_mt_bytes = g.split_vectors( row_mt,  [1]*4 ) # int32 separeted into int8                  
             #lower_bits_mt = row_mt_bytes[0]
             lower_bits_st = lower_bits_mt.read(streams=g.SG1_W[4], time=1+(num_of_chunks_result-1)*loop_length)
-            lower_bits_mt = lower_bits_st.write(name=f"lower_bits_{num_of_chunks_result-1}", layout="H1(W), A9, S1(12)")
+            lower_bits_mt = lower_bits_st.write(name=f"lower_bits_{num_of_chunks_result-1}", layout="H1(W), A9, S1(18)")
             
             # add memory tensor exclusion excxeption for the used tensors
             g.add_mem_constraints(extracted_bits_mt_list, [lower_bits_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)       
