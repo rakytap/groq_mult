@@ -167,7 +167,10 @@ class TopLevel(g.Component):  # Create our top level component
             
             #result_mem = result_mem = g.instruction.malloc( hemis=["W"],slices=range(0,4),banks=[0],count=2,reserve_key="example_key")
         
-        #return [result_mt]
+
+        #g.resolve_storage_requests(mmscope)
+        #print(mm_mt.addrs)
+        #return [result_mt]        
 
         with g.ResourceScope(name="bitreducescope", is_buffered=True, time=None, predecessors=[mmscope]) as brscope :             
             
@@ -189,7 +192,8 @@ class TopLevel(g.Component):  # Create our top level component
             '''
             next_row_mt = None
             next_row_mt_cp = None            
-            extracted_bits_mt_list = []    
+            extracted_bits_mt_list    = []    
+            extracted_bits_mt_list_cp = []                
             
             # while calculationg multiplication, creating some constant data
             dtype = g.int32
@@ -275,13 +279,16 @@ class TopLevel(g.Component):  # Create our top level component
                 array_extract_st = array_extract_mt.read(streams=g.SG4_E[5], time=None) 
             
                 lower_bits_st = g.bitwise_and( lower_bits_st, array_extract_st, output_streams=g.SG4_W[4], alus=self.and_alu_rq )
-                lower_bits_mt = lower_bits_st.write(name=f"lower_bits_{row_idx}", layout="H1(W), A9, S1(18)")
+                lower_bits_mt    = lower_bits_st.write(name=f"lower_bits_{row_idx}", layout="H1(W), A9, S1(18)")
+                lower_bits_mt_cp = lower_bits_st.write(name=f"lower_bits_cp_{row_idx}", layout="H1(W), A9, S1(21)")                
                 
                 # add memory tensor exclusion excxeption for the used tensors
-                g.add_mem_constraints(extracted_bits_mt_list+[result_mt], [lower_bits_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)     
+                g.add_mem_constraints(extracted_bits_mt_list, [lower_bits_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)     
+                g.add_mem_constraints(extracted_bits_mt_list_cp, [lower_bits_mt_cp], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)                 
                 #g.add_mem_constraints(extracted_bits_mt_list+row_result_mm_mt_list+[result_mt], [lower_bits_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
             
                 extracted_bits_mt_list.append( lower_bits_mt )               
+                extracted_bits_mt_list_cp.append( lower_bits_mt_cp )                    
                 
                 
                 #######  add the 7bit-shifet row to the next row  ###########
@@ -314,17 +321,111 @@ class TopLevel(g.Component):  # Create our top level component
             #row_mt_bytes = g.split_vectors( row_mt,  [1]*4 ) # int32 separeted into int8                  
             #lower_bits_mt = row_mt_bytes[0]
             lower_bits_st = lower_bits_mt.read(streams=g.SG1_W[4], time=1+(num_of_chunks_result-1)*loop_length)
-            lower_bits_mt = lower_bits_st.write(name=f"lower_bits_{num_of_chunks_result-1}", layout="H1(W), A9, S1(18)")
+            lower_bits_mt    = lower_bits_st.write(name=f"lower_bits_{num_of_chunks_result-1}", layout="H1(W), A9, S1(18)")
+            lower_bits_mt_cp = lower_bits_st.write(name=f"lower_bits_cp_{num_of_chunks_result-1}", layout="H1(W), A9, S1(21)")            
+            print( lower_bits_mt_cp.physical_shape )
             
             # add memory tensor exclusion excxeption for the used tensors
             g.add_mem_constraints(extracted_bits_mt_list, [lower_bits_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)       
+            g.add_mem_constraints(extracted_bits_mt_list_cp, [lower_bits_mt_cp], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)                  
             
             extracted_bits_mt_list.append( lower_bits_mt )   
+            extracted_bits_mt_list_cp.append( lower_bits_mt_cp )               
             
             g.add_mem_constraints(mm_chunks_mt_list, [next_row_mt_cp], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)      
             
-            g.resolve_storage_requests(brscope)
-   
+            #g.resolve_storage_requests(brscope)
+            
+        #return [result_mt] + extracted_bits_mt_list
+            
+        # component to sum up element-shifted rows
+        with g.ResourceScope(name="sumscope", is_buffered=True, time=None,  predecessors=[brscope]) as sumscope :  
+         
+            print('***************** sumscope scope **********************')
+            
+            #split lower bits of rows into array of chunks    
+            
+            lower_bits_chunks_mt_arr = np.ndarray( (num_of_chunks_result, bch.num_of_chunks), dtype='object')
+            lower_bits_chunks_mt_arr_cp = np.ndarray( (num_of_chunks_result, bch.num_of_chunks), dtype='object')
+            for row_idx in range(num_of_chunks_result):
+
+                row_chunks_list =  g.split_inner_splits(  extracted_bits_mt_list[row_idx] )
+                row_chunks_list_cp =  g.split_inner_splits(  extracted_bits_mt_list_cp[row_idx] )
+
+                for col_idx in range(bch.num_of_chunks): 
+                    #print( row_chunks_list[row_idx].physical_shape )
+                    #print( row_chunks_list_cp[row_idx].physical_shape )                    
+                    lower_bits_chunks_mt_arr[row_idx, col_idx] = row_chunks_list[col_idx]
+                    lower_bits_chunks_mt_arr_cp[row_idx, col_idx] = row_chunks_list_cp[col_idx]   
+                    
+
+            # zero tensors to pad the shifted row by zeros
+            dtype = g.int32
+            zeros_shape = (1, dim)
+            zeros_mt_pad32 = g.constant_tensor(zeros_shape, dtype, name="zeros_tensor_pad", layout="H1(W), A1, S4(12-15)")
+            zeros_mt_pad32.data = np.zeros(zeros_shape, dtype=dtype.to_nptype())
+            
+            zeros_mt_pad8      = g.reinterpret(zeros_mt_pad32, g.int8 )
+            zeros_mt_pad8_list = g.split_vectors( zeros_mt_pad8,  [1]*4 ) # int32 separeted into int8 
+            zeros_mt_pad8      = zeros_mt_pad8_list[0]
+            
+
+            
+            #zeros_ttt_st = zeros_mt_pad.read(streams=g.SG4_E[2], time=0)
+            #zeros_ttt_mt = zeros_ttt_st.write(name=f"test", layout="H1(E), -1, S2")
+            print( zeros_mt_pad8.physical_shape )
+                              
+                              
+            # storage request for iteratively used memory space storing next_row tensors and its copy
+            row_storreq    = g.tensor.create_storage_request(layout="H1(W), A9, S4(4-7)")
+            row_storreq_cp = g.tensor.create_storage_request(layout="H1(W), A9, S4(8-11)")     
+                                                                   
+            loop_length = 30       
+            
+            # ALU request for element-wise type cast operation
+            cast_alu_rq = g.tensor.create_alu_request(alus=[8]) 
+            
+            # ALU request for element-wise add operation
+            add_alu_rq = g.tensor.create_alu_request(alus=[5])    
+
+                    
+            # sum up shifted rows
+            for row_idx in range(num_of_chunks_result-1):
+                print('oooooooooooooooOOOOO')
+                    
+                if row_idx == 0:
+                    row_mt = g.concat_inner_splits( lower_bits_chunks_mt_arr_cp[row_idx, 1:] )# + [zeros_mt_pad])
+                    row_st       = row_mt.read(streams=g.SG1_E[4], time=0)  
+                    zeros_st_pad = zeros_mt_pad8.read(streams=g.SG1_E[4], time=bch.num_of_chunks+1)    
+                    row_st       = g.concat_inner_splits( [row_st,  zeros_st_pad] )         
+                    row_st = g.cast( row_st, g.int32, alus=[0], output_streams=g.SG4_E[3], time=None )                                        
+                    
+                else:
+                    row_mt_list = g.split_inner_splits(reduced_row_mt)
+                    row_mt = g.concat_inner_splits( row_mt_list[1:] )
+                    row_st = row_mt.read(streams=g.SG4_E[3], time=row_idx*loop_length) 
+                    zeros_st_pad = zeros_mt_pad32.read(streams=g.SG4_E[3], time=row_idx*loop_length + bch.num_of_chunks+1)    
+                    row_st       = g.concat_inner_splits( [row_st,  zeros_st_pad] )                                    
+                
+                print( row_st.physical_shape )                  
+                              
+              
+              
+                # tensor of the next row
+                next_row_mt = g.concat_inner_splits( lower_bits_chunks_mt_arr[row_idx+1, :] )
+                    
+                print( next_row_mt.physical_shape )                 
+                
+                      
+                next_row_st  = next_row_mt.read(streams=g.SG1_E[16], time=None)  
+                next_row_st = g.cast( next_row_st, g.int32, alus=cast_alu_rq, output_streams=g.SG4_E[4], time=None )                
+                
+                next_row_st = g.add( row_st, next_row_st, alus=add_alu_rq, output_streams=g.SG4_W[3], time=None )
+                reduced_row_mt    = next_row_st.write(name=f"reduced_row", storage_req=row_storreq)                 
+                #next_row_mt_cp = next_row_st.write(name=f"next_row_reduced_cp_{row_idx}", storage_req=row_storreq_cp)                 
+                
+                #g.add_mem_constraints(row_chunks_list_cp, [next_row_mt_cp], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
+        
     
         '''       
         # component to shift element along the inner dimension by amount of dim
@@ -346,7 +447,7 @@ class TopLevel(g.Component):  # Create our top level component
         return [result_mt] + extracted_bits_mt_list + [extracted_row_bits_shifted_mt]
         '''
 
-        return [result_mt] + extracted_bits_mt_list
+        return [result_mt] + extracted_bits_mt_list + [reduced_row_mt]
         #return result_mt, result_mt2
         #return lower_bits_mt, higher_bits_mt
 
@@ -438,8 +539,12 @@ groq_result_mm = result['result']
 #print(' ')
 #print(shifted_data2)
 
+
+
 extracted_bits_0 = result['lower_bits_0']
 print( extracted_bits_0[0,0:8])
+
+
 
 bits_extract = int(pow(2, bch.bitchunk))-1
 array_extract = np.ones( (1,dim*9), dtype=np.int32 ) * bits_extract  
@@ -447,12 +552,17 @@ extracted_bits_numpy_0 = np.bitwise_and( groq_result_mm[0, :],  array_extract)
 print(extracted_bits_numpy_0[0,0:8])
 
 
+groq_result = result['reduced_row']
+print(groq_result[0,0:8])
+groq_result = groq_result.reshape((1,1,bch.num_of_chunks, dim))
+
+'''
 groq_result = np.zeros( (num_of_chunks_result, bch.num_of_chunks*dim), dtype=np.int8)
 for idx in range(num_of_chunks_result):
     groq_result[idx,:] = result[f"lower_bits_{idx}"]
    
 groq_result = groq_result.reshape((num_of_chunks_result,1,bch.num_of_chunks, dim))
-
+'''
 #print( groq_result_tmp[:,0,0,59:70])
 
 

@@ -166,37 +166,46 @@ def convert_groq_result_to_double(bit_chunks, exponent):
     bit_chunks_8 = bit_chunks_8.astype(np.int8)
     '''
     
-    
+    '''
     bit_chunks_8 = bit_chunks.copy()
     
         
     #####return bit_chunks_8, exponent
 
-    reduced2 = bit_chunks_8[:,:,0,:].copy()
-    
+    reduced2 = bit_chunks_8[0,:,:,:].copy()
+       
 
 
 
-    for jdx in range(1, chunk_num_in_cols):
+    for idx in range(1, chunk_num_in_rows):
         tmp = reduced2.astype(np.int32)
-        reduced2 = bit_chunks_8[:,:,jdx,:].astype(np.int32)
-        reduced2[0:chunk_num_in_rows-1,:,:] += tmp[1:chunk_num_in_rows,:,:]
+        reduced2 = bit_chunks_8[idx,:,:,:].astype(np.int32)
+        print(' ')
+        print(tmp[0,1,0:8])
+        print(reduced2[0,0,0:8])        
+        reduced2[:,0:chunk_num_in_cols-1,:] += tmp[:,1:chunk_num_in_cols,:]
 
-    
-    reduced2 = reduced2.reshape( (shape_inp[0], shape_inp[1], 1, shape_inp[3]) )
+        print(reduced2[0,0,0:8])
+
+    reduced2 = reduced2.reshape( (1, shape_inp[1], shape_inp[2], shape_inp[3]) )    
+#    reduced2 = reduced2.reshape( (shape_inp[0], shape_inp[1], 1, shape_inp[3]) )
+    '''
     exponent_modified = exponent + bitchunk*(chunk_num_in_cols-1)
+    
+
 
     ####return reduced2, exponent_modified
 
-    reduced_8 = reduced2.copy()
+    reduced_8 = bit_chunks.copy()#reduced2.copy()
 
     array_extract = np.ones( (shape_inp[1], 1, shape_inp[3]), dtype=np.int32 ) * bits_extract
-    for idx in range(chunk_num_in_rows-1):
-        extracted_row = np.bitwise_and( reduced_8[idx, :, :, :],  array_extract)
+    for idx in range(chunk_num_in_cols-1):
+        extracted_row = np.bitwise_and( reduced_8[:, :, idx, :],  array_extract)
     
-        reduced_8[idx, :, :, :] = np.right_shift(reduced_8[idx, :, :, :], bitchunk)
-        reduced_8[idx+1, :, :, :] = reduced_8[idx+1, :, :, :] + reduced_8[idx, :, :, :]
-        reduced_8[idx, :, :, :] = extracted_row
+        reduced_8[:, :, idx, :] = np.right_shift(reduced_8[:, :, idx, :], bitchunk)
+        reduced_8[:, :, idx+1, :] = reduced_8[:, :, idx+1, :] + reduced_8[:, :, idx, :]
+        reduced_8[:, :, idx, :] = extracted_row
+
 
 
     reduced_8 = reduced_8.astype(np.int8)
