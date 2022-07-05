@@ -70,55 +70,20 @@ class ElementShift(nn.Component):  # Create our top level component
             return row_shifted_mt
             
             
-            
+# component to tile 8bit chunked matrix-matrix product
+class TiledMXM(nn.Component):  # Create our top level component
 
 
-
-class TopLevel(g.Component):  # Create our top level component
-    def __init__(self):
-        super().__init__()
-
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+    
         self.mm_list = []
         for idx in range(bch.num_of_chunks):
             self.mm_list.append( nn.MatMul(name=f"MyMatMul_{idx}", use_vxm_accum=True, planes=[0,1], is_resource_scope=True ) )     #Matmul: using the nn.MatMul() component.
         
-        # ALU request for bitshift operations (The resource is reused within iterative calls)
-        self.bitshift_alu_rq = g.tensor.create_alu_request(alus=[4])
-        
-        # ALU request for element-wise add operations (The resource is reused within iterative calls)
-        self.add_alu_rq = g.tensor.create_alu_request(alus=[1])     
-        
-        # ALU request for element-wise and operations (The resource is reused within iterative calls)
-        self.and_alu_rq = g.tensor.create_alu_request(alus=[8])    
-
-
-
-
-
-
-
-
-
-        
-        # resource request for element shifting over inner dimension
-        self.perm_rq = g.tensor.create_permutor_request(perm=[0], num_perm=1)
-        
-        
-        # ALU request for element-wise add operations (The resource is reused within iterative calls)
-        self.add_alu_rq2 = g.tensor.create_alu_request(alus=[2])     
-
-
-           
-
-
-        self.el_shift = ElementShift( self.perm_rq, self.add_alu_rq, is_resource_scope=True ) 
-
-
-    def build(self, mat1_mt, mat20_mt, time=0):   #Provide input matrices and a default time
-    #def build(self, mat1_mt, mat20_mt, mat21_mt, time=0):   #Provide input matrices and a default time
-
-
-        with g.ResourceScope(name="mmscope", is_buffered=True, time=0) as mmscope :
+    
+    
+    def build(self, mat1_mt, mat20_mt, time=0):   #Provide input matrices and a default time    
 
             print('MXM scope')   
             #result_mt = self.mm(mat1_mt, mat2_mt, time=0).write(name="mm_result", layout="H1(W), -1, S4")  #recommended layout for the matmul result
@@ -162,21 +127,33 @@ class TopLevel(g.Component):  # Create our top level component
                     #print( row_chunks_list[row_idx].physical_shape )
                     mm_chunks_mt_arr[row_idx, col_idx] = row_chunks_list[row_idx]
                     mm_chunks_mt_arr_cp[row_idx, col_idx] = row_chunks_list_cp[row_idx]
-           
-        
+                    
+                    
+            element_num = bch.num_of_chunks*num_of_chunks_result
+            return [result_mt] + list(mm_chunks_mt_arr.reshape(element_num)) + list(mm_chunks_mt_arr_cp.reshape(element_num))          
             
-            #result_mem = result_mem = g.instruction.malloc( hemis=["W"],slices=range(0,4),banks=[0],count=2,reserve_key="example_key")
-        
+            
+            
+# component to convert 32bit chunked matrix into 8bit chunked matrix
+class Convert32to8(nn.Component):  # Create our top level component
 
-        #g.resolve_storage_requests(mmscope)
-        #print(mm_mt.addrs)
-        #return [result_mt]        
 
-        with g.ResourceScope(name="bitreducescope", is_buffered=True, time=None, predecessors=[mmscope]) as brscope :             
-            
-            
-            print('***************** bitreduce scope **********************')
-           
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+    
+        # ALU request for bitshift operations (The resource is reused within iterative calls)
+        self.bitshift_alu_rq = g.tensor.create_alu_request(alus=[4])
+        
+        # ALU request for element-wise add operations (The resource is reused within iterative calls)
+        self.add_alu_rq = g.tensor.create_alu_request(alus=[1])     
+        
+        # ALU request for element-wise and operations (The resource is reused within iterative calls)
+        self.and_alu_rq = g.tensor.create_alu_request(alus=[8])    
+        
+    
+    
+    def build(self, mm_chunks_mt_arr, mm_chunks_mt_arr_cp, time=0):   #Provide input matrices and a default time    
+
             # slices 16, 20,24 and 28 reserved for system and slice 38 on wes side
             
             
@@ -332,19 +309,37 @@ class TopLevel(g.Component):  # Create our top level component
             extracted_bits_mt_list.append( lower_bits_mt )   
             extracted_bits_mt_list_cp.append( lower_bits_mt_cp )               
             
-            g.add_mem_constraints(mm_chunks_mt_list, [next_row_mt_cp], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)      
+            g.add_mem_constraints(list(mm_chunks_mt_arr.reshape(mm_chunks_mt_arr.size)), [next_row_mt_cp], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)      
+
+
+            return extracted_bits_mt_list + extracted_bits_mt_list_cp
             
-            #g.resolve_storage_requests(brscope)
             
-        #return [result_mt] + extracted_bits_mt_list
             
-        # component to sum up element-shifted rows
-        with g.ResourceScope(name="sumscope", is_buffered=True, time=None,  predecessors=[brscope]) as sumscope :  
-         
-            print('***************** sumscope scope **********************')
+# component to combine 8bit-chunk rows of a bitchunk matrix into a single rows of 32bit chunks. (The lowerst 63 bits are disregarded, and the higher 63 bits are kept)
+class CombineRows(nn.Component):  # Create our top level component
+
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+    
+        # storage request for iteratively used memory space storing next_row tensors and its copy
+        self.row_storreq    = g.tensor.create_storage_request(layout="H1(W), A9, S4(4-7)")
+        #self.row_storreq_cp = g.tensor.create_storage_request(layout="H1(W), A9, S4(8-11)")     
+                                                                   
+              
+        # ALU request for element-wise type cast operation
+        self.cast_alu_rq = g.tensor.create_alu_request(alus=[8]) 
             
-            #split lower bits of rows into array of chunks    
-            
+        # ALU request for element-wise add operation
+        self.add_alu_rq = g.tensor.create_alu_request(alus=[5])   
+        
+        self.loop_length = 30   
+        
+    
+    
+    def build(self, extracted_bits_mt_list, extracted_bits_mt_list_cp, time=0):   #Provide input matrices and a default time    
+
             lower_bits_chunks_mt_arr = np.ndarray( (num_of_chunks_result, bch.num_of_chunks), dtype='object')
             lower_bits_chunks_mt_arr_cp = np.ndarray( (num_of_chunks_result, bch.num_of_chunks), dtype='object')
             for row_idx in range(num_of_chunks_result):
@@ -375,20 +370,9 @@ class TopLevel(g.Component):  # Create our top level component
             #zeros_ttt_mt = zeros_ttt_st.write(name=f"test", layout="H1(E), -1, S2")
             print( zeros_mt_pad8.physical_shape )
                               
-                              
-            # storage request for iteratively used memory space storing next_row tensors and its copy
-            row_storreq    = g.tensor.create_storage_request(layout="H1(W), A9, S4(4-7)")
-            row_storreq_cp = g.tensor.create_storage_request(layout="H1(W), A9, S4(8-11)")     
                                                                    
-            loop_length = 30       
-            
-            # ALU request for element-wise type cast operation
-            cast_alu_rq = g.tensor.create_alu_request(alus=[8]) 
-            
-            # ALU request for element-wise add operation
-            add_alu_rq = g.tensor.create_alu_request(alus=[5])    
-
-                    
+                   
+                                
             # sum up shifted rows
             for row_idx in range(num_of_chunks_result-1):
                 print('oooooooooooooooOOOOO')
@@ -403,8 +387,8 @@ class TopLevel(g.Component):  # Create our top level component
                 else:
                     row_mt_list = g.split_inner_splits(reduced_row_mt)
                     row_mt = g.concat_inner_splits( row_mt_list[1:] )
-                    row_st = row_mt.read(streams=g.SG4_E[3], time=row_idx*loop_length) 
-                    zeros_st_pad = zeros_mt_pad32.read(streams=g.SG4_E[3], time=row_idx*loop_length + bch.num_of_chunks+1)    
+                    row_st = row_mt.read(streams=g.SG4_E[3], time=row_idx*self.loop_length) 
+                    zeros_st_pad = zeros_mt_pad32.read(streams=g.SG4_E[3], time=row_idx*self.loop_length + 6)    
                     row_st       = g.concat_inner_splits( [row_st,  zeros_st_pad] )                                    
                 
                 print( row_st.physical_shape )                  
@@ -418,14 +402,67 @@ class TopLevel(g.Component):  # Create our top level component
                 
                       
                 next_row_st  = next_row_mt.read(streams=g.SG1_E[16], time=None)  
-                next_row_st = g.cast( next_row_st, g.int32, alus=cast_alu_rq, output_streams=g.SG4_E[4], time=None )                
+                next_row_st = g.cast( next_row_st, g.int32, alus=self.cast_alu_rq, output_streams=g.SG4_E[4], time=None )                
                 
-                next_row_st = g.add( row_st, next_row_st, alus=add_alu_rq, output_streams=g.SG4_W[3], time=None )
-                reduced_row_mt    = next_row_st.write(name=f"reduced_row", storage_req=row_storreq)                 
-                #next_row_mt_cp = next_row_st.write(name=f"next_row_reduced_cp_{row_idx}", storage_req=row_storreq_cp)                 
-                
-                #g.add_mem_constraints(row_chunks_list_cp, [next_row_mt_cp], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
+                next_row_st = g.add( row_st, next_row_st, alus=self.add_alu_rq, output_streams=g.SG4_W[3], time=None )
+                reduced_row_mt    = next_row_st.write(name=f"reduced_row", storage_req=self.row_storreq)                 
+                #next_row_mt_cp = next_row_st.write(name=f"next_row_reduced_cp_{row_idx}", storage_req=self.row_storreq_cp)        
+
+            return reduced_row_mt
+            
+
+
+
+class TopLevel(g.Component):  # Create our top level component
+    def __init__(self):
+        super().__init__()    
+
+
+        self.tiledmxm = TiledMXM( is_resource_scope=True ) 
+
+        self.convert32to8 = Convert32to8( is_resource_scope=True ) 
         
+        self.combinerows = CombineRows( is_resource_scope=True ) 
+
+
+
+    def build(self, mat1_mt, mat20_mt, time=0):   #Provide input matrices and a default time
+    #def build(self, mat1_mt, mat20_mt, mat21_mt, time=0):   #Provide input matrices and a default time
+
+
+        with g.ResourceScope(name="mmscope", is_buffered=True, time=0) as mmscope :
+
+            print('MXM scope')   
+            mm_chunks_mt_list__ALL = self.tiledmxm(mat1_mt, mat20_mt)
+            result_mt = mm_chunks_mt_list__ALL[0]
+            mm_chunks_mt_list__ALL = mm_chunks_mt_list__ALL[1:]
+           
+            
+            length = int(len(mm_chunks_mt_list__ALL)/2)
+            mm_chunks_mt_list = mm_chunks_mt_list__ALL[0:length]
+            mm_chunks_mt_list_cp = mm_chunks_mt_list__ALL[ length: ]
+            
+            mm_chunks_mt_arr = np.array( mm_chunks_mt_list, dtype='object' ).reshape(num_of_chunks_result, bch.num_of_chunks)
+            mm_chunks_mt_arr_cp = np.array( mm_chunks_mt_list_cp, dtype='object' ).reshape(num_of_chunks_result, bch.num_of_chunks)
+            
+
+        with g.ResourceScope(name="bitreducescope", is_buffered=True, time=None, predecessors=[mmscope]) as brscope :             
+            
+            
+            print('***************** bitreduce scope **********************')
+            extracted_bits_mt_list__ALL = self.convert32to8(mm_chunks_mt_arr, mm_chunks_mt_arr_cp)
+            length = int(len(extracted_bits_mt_list__ALL)/2)
+            extracted_bits_mt_list = extracted_bits_mt_list__ALL[0:length]
+            extracted_bits_mt_list_cp = extracted_bits_mt_list__ALL[ length: ]
+                        
+        #return [result_mt] + extracted_bits_mt_list
+            
+        # component to sum up element-shifted rows
+        with g.ResourceScope(name="sumscope", is_buffered=True, time=None,  predecessors=[brscope]) as sumscope :  
+         
+            print('***************** sumscope scope **********************')
+            reduced_row_mt = self.combinerows(extracted_bits_mt_list, extracted_bits_mt_list_cp)
+            
     
         '''       
         # component to shift element along the inner dimension by amount of dim
