@@ -11,7 +11,7 @@ print("Python packages imported successfully")
 dim = 70
 num_of_chunks_result = 9
 
-matrix1 = g.input_tensor(shape=(num_of_chunks_result, dim), dtype=g.int8, name="matrix1", layout="H1(W), -1, S2(42-43)")
+matrix1 = g.input_tensor(shape=(num_of_chunks_result, dim), dtype=g.int8, name="matrix1", layout="H1(W), -1, S1(18)")
 matrix20 = g.input_tensor(shape=(bch.num_of_chunks*dim, dim), dtype=g.int8, name="matrix20", layout="H1(W), -1, S16(23-41)")
 #matrix21 = g.input_tensor(shape=(bch.num_of_chunks*dim, dim), dtype=g.int8, name="matrix21", layout="H1(E), -1, S16")
 
@@ -95,15 +95,14 @@ class TiledMXM(nn.Component):  # Create our top level component
             mm_chunks_mt_list = []
             mm_chunks_mt_list_cp = []
             start_time = 0
-            layouts = [f"H1(W), A9, S4(4-7)", f"H1(W), A9, S4(8-11)"]
             for idx in range(len(self.mm_list)):
                 mm_st = self.mm_list[idx](mat1_mt, mat20_chunks_mt[idx], time=start_time+1)
-                mm_mt = mm_st.write(name=f"mm_chunk_{idx}", layout=layouts[1])
+                mm_mt = mm_st.write(name=f"mm_chunk_{idx}", layout="H1(W), A9, S4(8-11)")
                 if idx>0:
                     g.add_mem_constraints(mm_chunks_mt_list, [mm_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)     
                 mm_chunks_mt_list.append( mm_mt )
 
-                mm_mt_cp = mm_st.write(name=f"mm_chunk_{idx}", layout=layouts[0])
+                mm_mt_cp = mm_st.write(name=f"mm_chunk_{idx}", layout="H1(W), A9, S4(4-7)")
                 if idx>0:
                     g.add_mem_constraints(mm_chunks_mt_list_cp, [mm_mt_cp], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)     
                 mm_chunks_mt_list_cp.append( mm_mt_cp )
@@ -152,21 +151,18 @@ class Convert32to8(nn.Component):  # Create our top level component
         
     
     
-    def build(self, mm_chunks_mt_arr, mm_chunks_mt_arr_cp, time=0):   #Provide input matrices and a default time    
+    def build(self, mm_chunks_mt_arr, mm_chunks_mt_arr_cp, loop_length=26, time=0):   #Provide input matrices and a default time    
 
             # slices 16, 20,24 and 28 reserved for system and slice 38 on wes side
+            
+            chunk_num_in_rows = mm_chunks_mt_arr.shape[0]
+            chunk_num_in_cols = mm_chunks_mt_arr.shape[1]
             
             
             # storage request for iteratively used memory space storing next_row tensors and its copy
             row_storreq    = g.tensor.create_storage_request(layout="H1(W), A9, S4(0-3)")
             row_storreq_cp = g.tensor.create_storage_request(layout="H1(W), A9, S4(8-11)")            
-                        
-            '''
-            # some data used to read out data for stream tensors from memory
-            #split_sizes = result_mt.physical_shape.inner_dims
-            #split_num = result_mt.physical_shape.splits
-            #vectors = result_mt.physical_shape.vectors            
-            '''
+                    
             next_row_mt = None
             next_row_mt_cp = None            
             extracted_bits_mt_list    = []    
@@ -174,7 +170,7 @@ class Convert32to8(nn.Component):  # Create our top level component
             
             # while calculationg multiplication, creating some constant data
             dtype = g.int32
-            bitshift_shape = (1, 320*bch.num_of_chunks)
+            bitshift_shape = (1, 320*chunk_num_in_cols)
             bitshift_mt = g.constant_tensor(bitshift_shape, dtype, name="bitshift_tensor", layout="H1(W), A9, S4(13-17)")
             bitshift_mt.data = np.ones(bitshift_shape, dtype=dtype.to_nptype()) * bch.bitchunk
             
@@ -189,12 +185,11 @@ class Convert32to8(nn.Component):  # Create our top level component
             array_extract_mt.data = np.ones( array_extract_shape, dtype=np.int8 ) * bits_extract         
             
            
-            print('pppppppppppppppppppppppppppppppppppppppp')     
                                       
             
-            loop_length = 26 # cycles
+            #loop_length = 26 # cycles
             
-            for row_idx in range(num_of_chunks_result-1):#range(num_of_chunks_result-1):
+            for row_idx in range(chunk_num_in_rows-1):
                 print('Iteration: row_idx='+str(row_idx))
                 
                                    
@@ -219,7 +214,7 @@ class Convert32to8(nn.Component):  # Create our top level component
                 if row_idx==0:
 
                     mm_chunks_mt_8_list = []
-                    for jdx in range(bch.num_of_chunks):
+                    for jdx in range(chunk_num_in_cols):
                         mm_chunk = mm_chunks_mt_arr[row_idx,jdx]
                         mm_chunk_8 = g.reinterpret(mm_chunk, g.int8 )
                         mm_chunk_8 = g.split_vectors( mm_chunk_8,  [1]*4 ) # int32 separeted into int8 
@@ -257,7 +252,7 @@ class Convert32to8(nn.Component):  # Create our top level component
             
                 lower_bits_st = g.bitwise_and( lower_bits_st, array_extract_st, output_streams=g.SG4_W[4], alus=self.and_alu_rq )
                 lower_bits_mt    = lower_bits_st.write(name=f"lower_bits_{row_idx}", layout="H1(W), A9, S1(18)")
-                lower_bits_mt_cp = lower_bits_st.write(name=f"lower_bits_cp_{row_idx}", layout="H1(W), A9, S1(21)")                
+                lower_bits_mt_cp = lower_bits_st.write(name=f"lower_bits_cp_{row_idx}", layout="H1(W), A9, S1(19)")                
                 
                 # add memory tensor exclusion excxeption for the used tensors
                 g.add_mem_constraints(extracted_bits_mt_list, [lower_bits_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)     
@@ -297,9 +292,9 @@ class Convert32to8(nn.Component):  # Create our top level component
             #row_mt = g.reinterpret(next_row_mt, g.int8 )
             #row_mt_bytes = g.split_vectors( row_mt,  [1]*4 ) # int32 separeted into int8                  
             #lower_bits_mt = row_mt_bytes[0]
-            lower_bits_st = lower_bits_mt.read(streams=g.SG1_W[4], time=1+(num_of_chunks_result-1)*loop_length)
-            lower_bits_mt    = lower_bits_st.write(name=f"lower_bits_{num_of_chunks_result-1}", layout="H1(W), A9, S1(18)")
-            lower_bits_mt_cp = lower_bits_st.write(name=f"lower_bits_cp_{num_of_chunks_result-1}", layout="H1(W), A9, S1(21)")            
+            lower_bits_st = lower_bits_mt.read(streams=g.SG1_W[4], time=1+(chunk_num_in_rows-1)*loop_length)
+            lower_bits_mt    = lower_bits_st.write(name=f"lower_bits_{chunk_num_in_rows-1}", layout="H1(W), A9, S1(18)")
+            lower_bits_mt_cp = lower_bits_st.write(name=f"lower_bits_cp_{chunk_num_in_rows-1}", layout="H1(W), A9, S1(21)")            
             print( lower_bits_mt_cp.physical_shape )
             
             # add memory tensor exclusion excxeption for the used tensors
@@ -325,7 +320,7 @@ class CombineRows(nn.Component):  # Create our top level component
     
         # storage request for iteratively used memory space storing next_row tensors and its copy
         self.row_storreq    = g.tensor.create_storage_request(layout="H1(W), A9, S4(4-7)")
-        #self.row_storreq_cp = g.tensor.create_storage_request(layout="H1(W), A9, S4(8-11)")     
+        self.row_storreq_cp = g.tensor.create_storage_request(layout="H1(W), A9, S4(8-11)")     
                                                                    
               
         # ALU request for element-wise type cast operation
@@ -405,10 +400,12 @@ class CombineRows(nn.Component):  # Create our top level component
                 next_row_st = g.cast( next_row_st, g.int32, alus=self.cast_alu_rq, output_streams=g.SG4_E[4], time=None )                
                 
                 next_row_st = g.add( row_st, next_row_st, alus=self.add_alu_rq, output_streams=g.SG4_W[3], time=None )
-                reduced_row_mt    = next_row_st.write(name=f"reduced_row", storage_req=self.row_storreq)                 
-                #next_row_mt_cp = next_row_st.write(name=f"next_row_reduced_cp_{row_idx}", storage_req=self.row_storreq_cp)        
+                reduced_row_mt    = next_row_st.write(name=f"reduced_row", storage_req=self.row_storreq)      
 
-            return reduced_row_mt
+                if row_idx == (num_of_chunks_result-2):
+                    reduced_row_mt_cp = next_row_st.write(name=f"next_row_reduced_cp_{row_idx}", storage_req=self.row_storreq_cp)        
+
+            return reduced_row_mt_cp, reduced_row_mt
             
 
 
@@ -424,6 +421,8 @@ class TopLevel(g.Component):  # Create our top level component
         
         self.combinerows = CombineRows( is_resource_scope=True ) 
 
+        self.convert32to8_2 = Convert32to8( is_resource_scope=True ) 
+
 
 
     def build(self, mat1_mt, mat20_mt, time=0):   #Provide input matrices and a default time
@@ -437,7 +436,7 @@ class TopLevel(g.Component):  # Create our top level component
             result_mt = mm_chunks_mt_list__ALL[0]
             mm_chunks_mt_list__ALL = mm_chunks_mt_list__ALL[1:]
            
-            
+            # split the result into np.arrays for further usage
             length = int(len(mm_chunks_mt_list__ALL)/2)
             mm_chunks_mt_list = mm_chunks_mt_list__ALL[0:length]
             mm_chunks_mt_list_cp = mm_chunks_mt_list__ALL[ length: ]
@@ -450,43 +449,53 @@ class TopLevel(g.Component):  # Create our top level component
             
             
             print('***************** bitreduce scope **********************')
-            extracted_bits_mt_list__ALL = self.convert32to8(mm_chunks_mt_arr, mm_chunks_mt_arr_cp)
+            loop_length = 26
+            extracted_bits_mt_list__ALL = self.convert32to8(mm_chunks_mt_arr, mm_chunks_mt_arr_cp, loop_length=loop_length)
             length = int(len(extracted_bits_mt_list__ALL)/2)
             extracted_bits_mt_list = extracted_bits_mt_list__ALL[0:length]
             extracted_bits_mt_list_cp = extracted_bits_mt_list__ALL[ length: ]
+
+            g.add_mem_constraints(extracted_bits_mt_list__ALL, [mat1_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
                         
         #return [result_mt] + extracted_bits_mt_list
+                            
             
         # component to sum up element-shifted rows
         with g.ResourceScope(name="sumscope", is_buffered=True, time=None,  predecessors=[brscope]) as sumscope :  
          
             print('***************** sumscope scope **********************')
-            reduced_row_mt = self.combinerows(extracted_bits_mt_list, extracted_bits_mt_list_cp)
             
-    
-        '''       
-        # component to shift element along the inner dimension by amount of dim
-        with g.ResourceScope(name="sftscope", is_buffered=True, time=None,  predecessors=[brscope]) as sftscope :  
-         
-            print('***************** sftscope scope **********************')     
-            
-            extracted_row_bits_mt = extracted_bits_mt_list[0]
-                    
-            # extract the second split
-            extracted_row_bits_mt_list = g.split_inner_splits(extracted_row_bits_mt)
-            extracted_row_bits_upper_half_mt = extracted_row_bits_mt_list[1]
-                    
-            extracted_row_bits_shifted_mt = self.el_shift( extracted_row_bits_mt, extracted_row_bits_upper_half_mt, split_sizes)  
-            
-            #g.resolve_storage_requests(sftscope)             
-        
-        
-        return [result_mt] + extracted_bits_mt_list + [extracted_row_bits_shifted_mt]
-        '''
 
-        return [result_mt] + extracted_bits_mt_list + [reduced_row_mt]
-        #return result_mt, result_mt2
-        #return lower_bits_mt, higher_bits_mt
+            
+            
+            
+            reduced_row_mt, reduced_row_mt_cp = self.combinerows(extracted_bits_mt_list, extracted_bits_mt_list_cp)
+            print(reduced_row_mt.physical_shape) 
+            reduced_row_mt_list    = g.split_inner_splits( reduced_row_mt )           
+            reduced_row_mt_cp_list = g.split_inner_splits( reduced_row_mt_cp )    
+        
+
+            
+            mm_chunks_mt_arr = np.array( reduced_row_mt_list, dtype='object' ).reshape(num_of_chunks_result, 1)
+            mm_chunks_mt_arr_cp = np.array( reduced_row_mt_cp_list, dtype='object' ).reshape(num_of_chunks_result, 1)   
+            
+            g.add_mem_constraints(mm_chunks_mt_list__ALL, [reduced_row_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
+
+        with g.ResourceScope(name="bitreducescope2", is_buffered=True, time=None, predecessors=[sumscope]) as brscope2 :             
+            
+            
+            print('***************** bitreduce scope 2**********************')
+            loop_length = 18
+            extracted_bits_mt_list__ALL = self.convert32to8_2(mm_chunks_mt_arr, mm_chunks_mt_arr_cp, loop_length=loop_length)
+            length = int(len(extracted_bits_mt_list__ALL)/2)
+            extracted_bits_mt_list = extracted_bits_mt_list__ALL[0:length]
+            extracted_bits_mt_list_cp = extracted_bits_mt_list__ALL[ length: ]    
+            reduced_row_mt = g.concat_vectors(extracted_bits_mt_list, (num_of_chunks_result,dim) )
+            reduced_row_mt.name = "reduced_row"
+
+            g.add_mem_constraints(extracted_bits_mt_list__ALL, [mat1_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
+
+        return [result_mt] + [reduced_row_mt]
 
 
 top = TopLevel()    # instantiate the top level component
@@ -565,44 +574,12 @@ print('Running the code on the Groq chip')
 program = g.create_tsp_runner(iop_file)
 t0 = time.time()
 result = program(matrix1=t1_data_8.reshape((num_of_chunks_result,dim)), matrix20=t2_data_8.reshape((bch.num_of_chunks*dim,dim)))
-print(result.keys())
 groq_result_mm = result['result']
-#shifted_data = result['shifted_row_0']
-#shifted_data2 = result['shifted_data2']
-#print(shifted_data.shape)
-#print(result["lower_bits_0"])
-#print(' ')
-#print(shifted_data)
-#print(' ')
-#print(shifted_data2)
 
-
-
-extracted_bits_0 = result['lower_bits_0']
-print( extracted_bits_0[0,0:8])
-
-
-
-bits_extract = int(pow(2, bch.bitchunk))-1
-array_extract = np.ones( (1,dim*9), dtype=np.int32 ) * bits_extract  
-extracted_bits_numpy_0 = np.bitwise_and( groq_result_mm[0, :],  array_extract)
-print(extracted_bits_numpy_0[0,0:8])
 
 
 groq_result = result['reduced_row']
-print(groq_result[0,0:8])
 groq_result = groq_result.reshape((1,1,bch.num_of_chunks, dim))
-
-'''
-groq_result = np.zeros( (num_of_chunks_result, bch.num_of_chunks*dim), dtype=np.int8)
-for idx in range(num_of_chunks_result):
-    groq_result[idx,:] = result[f"lower_bits_{idx}"]
-   
-groq_result = groq_result.reshape((num_of_chunks_result,1,bch.num_of_chunks, dim))
-'''
-#print( groq_result_tmp[:,0,0,59:70])
-
-
    
 
 # reshape the test result according to the expected inputs of the bitchunks module
@@ -610,21 +587,29 @@ groq_result_mm = groq_result_mm.reshape( (num_of_chunks_result, 1, bch.num_of_ch
 mult_result_exponent = exponent_t1_data + exponent_t2_data - bch.double_mantissa_bits # becouse of the multiplication the number of double mantissa bits in combining the 8bit results should be counted twice, hence here we offset the expoentn by the mantissa bit number
 
 
+t0b = time.time()
+#groq_result_double2, mult_result_exponent_modified = bch.convert_groq_result_to_double(groq_result, mult_result_exponent)
+groq_result_double2 = groq_result
+mult_result_exponent_modified = mult_result_exponent + bch.bitchunk*(bch.num_of_chunks-1)
+groq_result_double2 = bch.combine_bitchunks_into_double(groq_result_double2, mult_result_exponent_modified)
+print("Groq recombination time 2: " + str( time.time()-t0b) )
+
+print("Groq time: " + str( time.time()-t0) )
+
+
+
 # recombine chunk into 64bit floats
 t0b = time.time()
 groq_result_double = bch.combine_bitchunks_into_double(groq_result_mm, mult_result_exponent)
 print("Groq recombination time: " + str( time.time()-t0b) )
 
-t0b = time.time()
-groq_result_double2, mult_result_exponent_modified = bch.convert_groq_result_to_double(groq_result, mult_result_exponent)
-groq_result_double2 = bch.combine_bitchunks_into_double(groq_result_double2, mult_result_exponent_modified)
-print("Groq recombination time 2: " + str( time.time()-t0b) )
+
 
 groq_result_double3, mult_result_exponent_modified3 = bch.convert_groq_result_to_double2(groq_result_mm, mult_result_exponent)
 groq_result_double3 = bch.combine_bitchunks_into_double(groq_result_double3, mult_result_exponent_modified3)
 
 
-print("Groq time: " + str( time.time()-t0) )
+
 
 ###########################################################################################################
 # Check Result

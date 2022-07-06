@@ -190,12 +190,23 @@ def convert_groq_result_to_double(bit_chunks, exponent):
     reduced2 = reduced2.reshape( (1, shape_inp[1], shape_inp[2], shape_inp[3]) )    
 #    reduced2 = reduced2.reshape( (shape_inp[0], shape_inp[1], 1, shape_inp[3]) )
     '''
-    exponent_modified = exponent + bitchunk*(chunk_num_in_cols-1)
     
-
-
+    '''
+    exponent_modified = exponent + bitchunk*(chunk_num_in_cols-1)+7
+    
+    
+    reduced_8 = bit_chunks.copy()#reduced2.copy()
+    array_extract = np.ones( (shape_inp[1], shape_inp[2], shape_inp[3]), dtype=np.int32 ) * bits_extract
+    
+    extracted_row = np.bitwise_and( reduced_8[0, :, :, :],  array_extract)
+    reduced_8[0, :, :, :] = np.right_shift(reduced_8[0, :, :, :], bitchunk)
+    reduced_8[0, :, 0:shape_inp[2]-1, ] = reduced_8[0, :, 0:shape_inp[2]-1, :] + extracted_row[:, 1:, :]
+    '''
+    
+    exponent_modified = exponent + bitchunk*(chunk_num_in_cols-1)
+    '''
     ####return reduced2, exponent_modified
-
+    
     reduced_8 = bit_chunks.copy()#reduced2.copy()
 
     array_extract = np.ones( (shape_inp[1], 1, shape_inp[3]), dtype=np.int32 ) * bits_extract
@@ -205,11 +216,12 @@ def convert_groq_result_to_double(bit_chunks, exponent):
         reduced_8[:, :, idx, :] = np.right_shift(reduced_8[:, :, idx, :], bitchunk)
         reduced_8[:, :, idx+1, :] = reduced_8[:, :, idx+1, :] + reduced_8[:, :, idx, :]
         reduced_8[:, :, idx, :] = extracted_row
+    
+    '''
 
-
-
-    reduced_8 = reduced_8.astype(np.int8)
-
+    #reduced_8 = reduced_8.astype(np.int8)
+    print(bit_chunks)
+    reduced_8 = bit_chunks.copy()
 
     
 
