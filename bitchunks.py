@@ -2,12 +2,12 @@ import numpy as np
 
 #default values for bit splitting
 bitchunk = 7
-num_of_chunks = 9
+num_of_chunks = 10
 full_bitwidth = 50#num_of_chunks*bitchunk
 bound = pow(2, full_bitwidth)
 
 # default values for folating point bit splitting
-double_mantissa_bits = 52
+double_mantissa_bits = 56#52
 double_exponent_bias = 1023
 
 
@@ -16,40 +16,17 @@ double_exponent_bias = 1023
 # todo: check if inp is a two-dimensional array
 def divide_into_bitchunks(inp, num_of_chunks):
 
-    # determine the dimensions of the return
-    shape = (num_of_chunks,) + inp.shape
-
-    sign_bits = np.sign(inp)
-    sign_bits = (np.abs(sign_bits) - sign_bits)/2
-    sign_bits = sign_bits.astype(np.int8)
-    #print( sign_bits[:,0:10] )
-    #print(inp)
-    inp_loc = inp.copy()
-    #print(inp_loc)
+    if len(inp.shape) == 2:
+        ret, shp = np.repeat(inp[np.newaxis,:,:], num_of_chunks, axis=0), (num_of_chunks, 1, 1)
+    else: 
+        ret, shp = np.repeat(inp[np.newaxis,:], num_of_chunks, axis=0), (num_of_chunks, 1)
 
 
+    ret = ((ret >> np.arange(0, bitchunk * num_of_chunks, bitchunk).reshape(shp)) & np.array([((1 << bitchunk)-1)]*(num_of_chunks-1)+[-1]).reshape(shp)).astype(np.int8)
 
-    # reserve space for the return
-    ret = np.zeros(shape, dtype=np.int8)
-    
-    
-    for chunk in range(num_of_chunks):
-
-        # extract decimal bits
-        for bit_idx in range(bitchunk):
-            bit = (inp_loc % 2)
-            ret[chunk] += pow(2,bit_idx)*bit
-            inp_loc = np.right_shift(inp_loc,1)
-
-        
-        # adding sign bit
-        if( chunk == num_of_chunks-1) :
-            bit = (inp_loc % 2)
-            ret[chunk] = (ret[chunk].astype(np.uint8) + pow(2,bitchunk)*bit).astype(np.int8)
-                
-
-    shape_new = ( shape[0], shape[1], 1, shape[2] )
+    shape_new = ( num_of_chunks, inp.shape[0], 1, inp.shape[1] )
     ret = ret.reshape(shape_new)
+
     return ret
 
 
@@ -93,7 +70,7 @@ def divide_double_into_bitchunks(inp, num_of_chunks):
 
         exponent -= 1        
     
-    #print(exponent)
+    print(f"exponent: {exponent}")
     
 
     inp_mantissa = (np.ceil(inp * pow(2, double_mantissa_bits-exponent))).astype(np.int64)
@@ -120,12 +97,12 @@ def combine_bitchunks_into_double(bit_chunks, exponent):
     chunk_num_in_rows = shape_inp[0]
     chunk_num_in_cols = shape_inp[2]
 
-    ret = np.zeros((shape_inp[1], shape_inp[3]), dtype=np.float64)
+    ret = np.zeros((shape_inp[1], shape_inp[3]), dtype=np.longdouble)
     for idx in range(chunk_num_in_rows):
         for jdx in range(chunk_num_in_cols):
             
             power = bitchunk*(idx+jdx) - double_mantissa_bits + exponent
-            ret += bit_chunks[idx,:,jdx,:].astype(np.float64) * pow(2.0, power)
+            ret += bit_chunks[idx,:,jdx,:].astype(np.longdouble) * pow(2.0, power)
 
     return ret
 

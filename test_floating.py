@@ -512,16 +512,19 @@ print('Calculating expected numpy result')
 t1_data = (np.random.rand(1, dim)*2 - 1.0)
 t2_data = np.random.rand(dim, dim)*2 - 1.0
 
+#t1_data = np.full((1, dim,), -((1 << 53)-1000000)/(1<<53))
+#t2_data = np.full((dim, dim), -((1 << 53)-1000000)/(1<<53))
+
 
 
 # create 8 bit chunks
 t1_data_8, exponent_t1_data = bch.divide_double_into_bitchunks(t1_data, num_of_chunks_result)
-print( t1_data_8[:,0:10])
+print( t1_data_8[:,0,0,0:10])
 
 # recombine chunk into 64 floats
 t1_data_double = bch.combine_bitchunks_into_double(t1_data_8, exponent_t1_data)
 
-print('test t1_data: '+str(np.allclose(t1_data, t1_data_double, rtol=1e-1, atol=1e-1, equal_nan=True)))
+print('test t1_data: '+str(np.allclose(t1_data, t1_data_double, rtol=1e-10, atol=1e-15, equal_nan=True)))
 
 
 # create 8 bit chunks
@@ -531,13 +534,13 @@ t2_data_8, exponent_t2_data = bch.divide_double_into_bitchunks(t2_data, bch.num_
 # recombine chunk into 64 floats
 t2_data_double = bch.combine_bitchunks_into_double(t2_data_8, exponent_t2_data)
 
-print('test t2_data: '+str(np.allclose(t2_data, t2_data_double, rtol=1e-1, atol=1e-1, equal_nan=True)))
+print('test t2_data: '+str(np.allclose(t2_data, t2_data_double, rtol=1e-10, atol=1e-15, equal_nan=True)))
 
 ###########################################################################################
 
 t0 = time.time()
 # matmul with 32 bit arithmetics
-mult_result = np.matmul(t1_data, t2_data.transpose())
+mult_result = np.matmul(t1_data.astype(np.longdouble), t2_data.astype(np.longdouble).transpose())
 print("numpy time: " + str( time.time()-t0) )
 
 # multiplication with 8bit arithmetics
@@ -578,7 +581,7 @@ groq_result_mm = result['result']
 
 groq_result = result['reduced_row']
 print( groq_result.shape )
-print( groq_result[-1,0:dim])   
+print( groq_result[:,0:10])   
 groq_result = groq_result.reshape((1,1,bch.num_of_chunks, dim))
 
 
@@ -614,6 +617,8 @@ groq_result_double3 = bch.combine_bitchunks_into_double(groq_result_double3, mul
 ###########################################################################################################
 # Check Result
 
+#np.set_printoptions(formatter={'float': lambda x: "{0:0.16f}".format(x)})
+np.set_printoptions(precision=16)
 
 print("Matrix Multiplication for input tensors of size {} x {}.  Results are: ".format(t1_data.shape, t2_data.shape))
 print('Groq chip matmul: '+str(np.allclose(mult_result, groq_result_double, rtol=1e-10, atol=1e-15, equal_nan=True)))
