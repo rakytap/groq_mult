@@ -27,9 +27,9 @@ class TiledMXM(nn.Component):  # Create our top level component
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
     
-        self.mm_list = []
-        for idx in range(bch.num_of_chunks):
-            self.mm_list.append( nn.MatMul(name=f"MyMatMul_{idx}", use_vxm_accum=False, planes=[1], num_planes=1, is_resource_scope=True ) )     #Matmul: using the nn.MatMul() component.
+        #self.mm_list = []
+        #for idx in range(bch.num_of_chunks):
+        #    self.mm_list.append( nn.MatMul(name=f"MyMatMul_{idx}", use_vxm_accum=False, planes=[idx%2], num_planes=1, is_resource_scope=True ) )     #Matmul: using the nn.MatMul() component.
         
     
     
@@ -45,14 +45,25 @@ class TiledMXM(nn.Component):  # Create our top level component
             mm_chunks_mt_list = []
             mm_chunks_mt_list_cp = []
             mm_chunks_mt_list_cp2 = []
-            start_time = 0
-            for idx in range(len(self.mm_list)):
-                mm_st = self.mm_list[idx](mat1_mt, mat20_chunks_mt[idx], time=start_time+1)
+
+            mxm_rqs = []
+            mxm_rqs.append( g.tensor.create_mxm_request(planes=[0]) )
+            mxm_rqs.append( g.tensor.create_mxm_request(planes=[1]) )
+
+            start_time = [0, bch.num_of_chunks]
+            for idx in range(bch.num_of_chunks):
+
+                iw = g.install_weights(mat20_chunks_mt[idx], planes=mxm_rqs[idx%2], time=start_time[idx%2])
+                mm_st = mat1_mt.matmul(iw, planes=mxm_rqs[idx%2], time=10+start_time[idx%2])
+                
+                #mm_st = self.mm_list[idx](mat1_st, mat20_st, time=start_time[idx%2])
+
+
                 mm_mt = mm_st.write(name=f"mm_chunk_{idx}", layout=f"H1(W), A{bch.num_of_chunks}, S4(8-11)")
                 if idx>0:
                     g.add_mem_constraints(mm_chunks_mt_list, [mm_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)     
                 mm_chunks_mt_list.append( mm_mt )
-
+                
                 mm_mt_cp = mm_st.write(name=f"mm_chunk_cp_{idx}", layout=f"H1(W), A{bch.num_of_chunks}, S4(4-7)")
                 if idx>0:
                     g.add_mem_constraints(mm_chunks_mt_list_cp, [mm_mt_cp], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)     
@@ -64,13 +75,14 @@ class TiledMXM(nn.Component):  # Create our top level component
                 mm_chunks_mt_list_cp2.append( mm_mt_cp2 )
                 
                 
-                start_time = self.mm_list[idx].end_time
+                #start_time[idx%2] = self.mm_list[idx].end_time
+                start_time[idx%2] = start_time[idx%2] + 2*bch.num_of_chunks
 
             print( mm_chunks_mt_list[0].physical_shape )
             result_mt = g.concat_inner_splits(mm_chunks_mt_list)
             result_mt.name = 'result'
 
-
+            
             mm_chunks_mt_arr = np.ndarray( (num_of_chunks_result, bch.num_of_chunks), dtype='object')
             mm_chunks_mt_arr_cp = np.ndarray( (num_of_chunks_result, bch.num_of_chunks), dtype='object')
             mm_chunks_mt_arr_cp2 = np.ndarray( (num_of_chunks_result, bch.num_of_chunks), dtype='object')
@@ -88,8 +100,9 @@ class TiledMXM(nn.Component):  # Create our top level component
                     
                     
             element_num = bch.num_of_chunks*num_of_chunks_result
-            return [result_mt] + list(mm_chunks_mt_arr.reshape(element_num)) + list(mm_chunks_mt_arr_cp.reshape(element_num)) + list(mm_chunks_mt_arr_cp2.reshape(element_num))       
-
+            return [result_mt] + list(mm_chunks_mt_arr.reshape(element_num)) + list(mm_chunks_mt_arr_cp.reshape(element_num)) + list(mm_chunks_mt_arr_cp2.reshape(element_num))   
+              
+            #return [result_mt]
 
 
 
@@ -430,7 +443,7 @@ class TopLevel(g.Component):  # Create our top level component
     def __init__(self):
         super().__init__()    
 
-        # component to perform the int8 matrix multiplication, splitted into chunks. (TODO: parallelize using both MxM planes) 
+        # component to perform the int8 matrix multiplication, splitted into chunks.
         self.tiledmxm = TiledMXM( is_resource_scope=True ) 
 
         # component to reduce the bitchunk_num x bitchunk_num result matrix to a single vector of bitchunks. (Here overflow over int8 might still occur)
@@ -443,12 +456,13 @@ class TopLevel(g.Component):  # Create our top level component
     def build(self, mat1_mt, mat20_mt, time=0):   #Provide input matrices and a default time
     #def build(self, mat1_mt, mat20_mt, mat21_mt, time=0):   #Provide input matrices and a default time
 
-        # component to perform the int8 matrix multiplication, splitted into chunks. (TODO: parallelize using both MxM planes) 
+        # component to perform the int8 matrix multiplication, splitted into chunks.
         with g.ResourceScope(name="mmscope", is_buffered=True, time=0) as mmscope :
 
             print('MXM scope')   
             mm_chunks_mt_list__ALL = self.tiledmxm(mat1_mt, mat20_mt)
             result_mt = mm_chunks_mt_list__ALL[0]
+            
             mm_chunks_mt_list__ALL = mm_chunks_mt_list__ALL[1:]
            
             # split the result into np.arrays for further usage
@@ -460,7 +474,7 @@ class TopLevel(g.Component):  # Create our top level component
             mm_chunks_mt_arr     = np.array( mm_chunks_mt_list, dtype='object' ).reshape(num_of_chunks_result, bch.num_of_chunks)
             mm_chunks_mt_arr_cp  = np.array( mm_chunks_mt_list_cp, dtype='object' ).reshape(num_of_chunks_result, bch.num_of_chunks)
             mm_chunks_mt_arr_cp2 = np.array( mm_chunks_mt_list_cp2, dtype='object' ).reshape(num_of_chunks_result, bch.num_of_chunks)
-
+            
         #return [result_mt] 
 
         # component to reduce the bitchunk_num x bitchunk_num result matrix to a single vector of bitchunks. (Here overflow over int8 might still occur)
