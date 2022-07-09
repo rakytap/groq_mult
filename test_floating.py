@@ -430,16 +430,20 @@ class TopLevel(g.Component):  # Create our top level component
     def __init__(self):
         super().__init__()    
 
-
+        # component to perform the int8 matrix multiplication, splitted into chunks. (TODO: parallelize using both MxM planes) 
         self.tiledmxm = TiledMXM( is_resource_scope=True ) 
+
+        # component to reduce the bitchunk_num x bitchunk_num result matrix to a single vector of bitchunks. (Here overflow over int8 might still occur)
         self.reduceMMresult = ReduceMMResult( is_resource_scope=True )  
+
+        # component to reduce the result of the previous component to int8 handling the overflows
         self.reduce32to8 = Reduce32to8( is_resource_scope=True ) 
 
 
     def build(self, mat1_mt, mat20_mt, time=0):   #Provide input matrices and a default time
     #def build(self, mat1_mt, mat20_mt, mat21_mt, time=0):   #Provide input matrices and a default time
 
-
+        # component to perform the int8 matrix multiplication, splitted into chunks. (TODO: parallelize using both MxM planes) 
         with g.ResourceScope(name="mmscope", is_buffered=True, time=0) as mmscope :
 
             print('MXM scope')   
@@ -458,17 +462,20 @@ class TopLevel(g.Component):  # Create our top level component
             mm_chunks_mt_arr_cp2 = np.array( mm_chunks_mt_list_cp2, dtype='object' ).reshape(num_of_chunks_result, bch.num_of_chunks)
 
         #return [result_mt] 
+
+        # component to reduce the bitchunk_num x bitchunk_num result matrix to a single vector of bitchunks. (Here overflow over int8 might still occur)
         with g.ResourceScope(name="reducemmscope", is_buffered=True, time=None, predecessors=[mmscope]) as rmmscope :             
             
             
             print('***************** MxM reduce scope **********************')
-            loop_length = 33+(bch.num_of_chunks-9)
+            loop_length = 30+(bch.num_of_chunks-9)
 
             # keep in mind reduced_mm_mt <-> reduced_mm_mt_cp interchange compared to the component output
             reduced_mm_mt_cp, reduced_mm_mt = self.reduceMMresult(mm_chunks_mt_arr, mm_chunks_mt_arr_cp, mm_chunks_mt_arr_cp2, loop_length=loop_length)
 
             g.add_mem_constraints([reduced_mm_mt], [mat1_mt], g.MemConstraintType.NOT_MUTUALLY_EXCLUSIVE)
 
+        # make copy of reduced_mm into memory slices expected by component Convert32to8      
         with g.ResourceScope(name="copyscope", is_buffered=True, time=None, predecessors=[rmmscope]) as cpscope :   
 
 
@@ -480,6 +487,7 @@ class TopLevel(g.Component):  # Create our top level component
             mm_chunks_mt_arr_cp =  np.array( g.split_inner_splits(  reduced_mm_mt_cp ) ).reshape( (num_of_chunks_result, 1) )
 
 
+        # component to reduce the result of the previous component to int8 handling the overflows
         with g.ResourceScope(name="bitreducescope", is_buffered=True, time=None, predecessors=[cpscope]) as brscope :   
 
             
@@ -564,14 +572,6 @@ mult_result_8 = mult_result_8.reshape( (num_of_chunks_result, 1, bch.num_of_chun
 # recombine chunk into 64bit floats
 mult_result_double = bch.combine_bitchunks_into_double(mult_result_8, mult_result_exponent)
 
-'''
-# create 8 bit chunks
-mult_result_8, mult_result_exponent = bch.divide_double_into_bitchunks(mult_result, bch.num_of_chunks)
-
-# recombine chunk into 64 floats
-mult_result_double = bch.combine_bitchunks_into_double(mult_result_8, mult_result_exponent)
-'''
-
 print('test matmul with numpy: '+str(np.allclose(mult_result, mult_result_double, rtol=1e-1, atol=1e-1, equal_nan=True)))
 #print(mult_result_double)
 #print(mult_result)
@@ -600,9 +600,8 @@ mult_result_exponent = exponent_t1_data + exponent_t2_data - bch.double_mantissa
 t0b = time.time()
 mult_result_exponent_modified3 = mult_result_exponent + bch.bitchunk*(bch.num_of_chunks-1)
 groq_result_double3 = bch.combine_bitchunks_into_double(reduced_row, mult_result_exponent_modified3)
-idx=8
-print("Groq bit-chunk recombination time: " + str( time.time()-t0b) )
 
+print("Groq bit-chunk recombination time: " + str( time.time()-t0b) )
 print("Groq time full (including recombination): " + str( time.time()-t0) )
 
 
